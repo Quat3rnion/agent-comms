@@ -18,3 +18,10 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 proptest = "1"
+
+# Password hashing is very slow without optimization; tests and debug builds
+# verify many argon2 hashes.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

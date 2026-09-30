@@ -49,6 +49,11 @@ impl Outbound {
         )
     }
 
+    /// True when both handles feed the same connection.
+    pub fn same_channel(&self, other: &Outbound) -> bool {
+        self.tx.same_channel(&other.tx)
+    }
+
     /// Queue one line (without CRLF). Returns false when the line was dropped.
     pub fn send_line(&self, line: &str) -> bool {
         if self.is_closed() {

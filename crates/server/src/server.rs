@@ -24,7 +24,19 @@ pub fn default_modules(config: &Config) -> anyhow::Result<Vec<Arc<dyn Module>>> 
     };
     use crate::store::Store;
 
+    use crate::modules::{
+        agent::AgentModule, claims::ClaimsModule, hub::LinkHub, link::LinkModule,
+    };
+
     let m = &config.modules;
+    let store = if m.history || m.link || m.claims {
+        Some(Arc::new(Store::open(&config.db_path()).with_context(
+            || format!("open database {}", config.db_path().display()),
+        )?))
+    } else {
+        None
+    };
+    let hub = Arc::new(LinkHub::new(store.clone()));
     let mut out: Vec<Arc<dyn Module>> = Vec::new();
     if m.broadcast {
         out.push(Arc::new(BroadcastModule));
@@ -33,11 +45,22 @@ pub fn default_modules(config: &Config) -> anyhow::Result<Vec<Arc<dyn Module>>> 
         out.push(Arc::new(AuthorityModule));
     }
     if m.history {
-        let store = Arc::new(
-            Store::open(&config.db_path())
-                .with_context(|| format!("open database {}", config.db_path().display()))?,
-        );
-        out.push(Arc::new(HistoryModule::new(store, config)));
+        if let Some(store) = &store {
+            out.push(Arc::new(HistoryModule::new(store.clone(), config)));
+        }
+    }
+    if m.link {
+        out.push(Arc::new(LinkModule::new(hub.clone(), config)));
+    }
+    if m.claims {
+        let claims = ClaimsModule::new(hub.clone(), config);
+        hub.register_extension(claims.clone());
+        out.push(claims);
+    }
+    if m.agent {
+        let agent = AgentModule::new(hub.clone(), config);
+        hub.register_extension(agent.clone());
+        out.push(agent);
     }
     Ok(out)
 }
@@ -91,6 +114,14 @@ pub async fn start_with(
         .with_context(|| format!("bind {}", config.bind))?;
     let local_addr = listener.local_addr()?;
     let state: SharedState = Arc::new(ServerState::new(config, secrets, modules));
+    // One tick before the first connection, so that modules can restore
+    // persisted state (for example dormant link accounts).
+    {
+        let now = SystemTime::now();
+        for module in &state.modules {
+            module.on_tick(&state, now);
+        }
+    }
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let accept_task = {
