@@ -12,6 +12,11 @@ pub fn link_token_file(config_dir: &Path) -> PathBuf {
     config_dir.join("link-token")
 }
 
+/// Pid file of a running `serve`, in the data directory.
+pub fn pid_file(data_dir: &Path) -> PathBuf {
+    data_dir.join("agent-comms.pid")
+}
+
 pub fn default_secrets_file(config_dir: &Path) -> PathBuf {
     config_dir.join("secrets.toml")
 }

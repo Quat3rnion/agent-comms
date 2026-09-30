@@ -152,8 +152,8 @@ export async function startServer(options: StartServerOptions = {}): Promise<Tes
   // `install` writes secrets.toml (mode 0600, argon2 hashes) and the link-token file.
   const install = spawnSync(
     bin,
-    ["--config-dir", configDir, "install", "--no-launchd", "--operator-password", operatorPassword],
-    { env, encoding: "utf8" },
+    ["--config-dir", configDir, "install", "--no-launchd", "--password-stdin"],
+    { env, encoding: "utf8", input: `${operatorPassword}\n` },
   )
   if (install.status !== 0) {
     throw new Error(`agent-comms install failed (${install.status}): ${install.stderr}${install.stdout}`)

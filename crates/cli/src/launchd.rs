@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub const LABEL: &str = "local.agent-comms";
 
@@ -85,6 +85,32 @@ fn uid() -> Result<String> {
 fn launchctl(args: &[&str]) -> Result<bool> {
     let status = Command::new("launchctl")
         .args(args)
+        .status()
+        .context("cannot run launchctl")?;
+    Ok(status.success())
+}
+
+/// Send SIGHUP to the service when this user installed and loaded it.
+/// Returns true when launchctl sent the signal.
+pub fn signal_reload() -> Result<bool> {
+    if !cfg!(target_os = "macos") || !plist_path().exists() {
+        return Ok(false);
+    }
+    let target = format!("gui/{}/{LABEL}", uid()?);
+    let loaded = Command::new("launchctl")
+        .args(["print", &target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !loaded {
+        return Ok(false);
+    }
+    let status = Command::new("launchctl")
+        .args(["kill", "SIGHUP", &target])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .context("cannot run launchctl")?;
     Ok(status.success())

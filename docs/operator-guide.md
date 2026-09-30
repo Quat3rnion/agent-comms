@@ -104,12 +104,22 @@ The installer cannot show the password again.
 
 Options of `agent-comms install`:
 
-| Option                     | Effect                                                  |
-|----------------------------|---------------------------------------------------------|
-| `--force`                  | Replace the operator password and all link tokens.      |
-| `--no-launchd`             | Do not write or load the launchd service.               |
-| `--operator-password <PW>` | Use this password. Do not make a random one.            |
-| `--port <PORT>`            | Set the listen port in a new `config.toml`.             |
+| Option             | Effect                                                          |
+|--------------------|-----------------------------------------------------------------|
+| `--force`          | Replace the operator password and all link tokens.              |
+| `--no-launchd`     | Do not write or load the launchd service.                       |
+| `--password-stdin` | Read the operator password from the first line of stdin.        |
+| `--prompt`         | Type the operator password in the terminal.                     |
+| `--port <PORT>`    | Set the listen port in a new `config.toml`.                     |
+
+Without `--password-stdin` or `--prompt`, the installer makes a random
+password. No option accepts a password as a command-line argument, because
+other users can see the arguments of a process (for example, with `ps`).
+An example that reads the password from a file:
+
+```
+agent-comms install --password-stdin < ~/operator-password.txt
+```
 
 A second `agent-comms install` keeps the existing secrets and the existing
 `config.toml`. It writes the launchd service file again and restarts the
@@ -307,10 +317,39 @@ Rotate the link token when you think that it is known to another person.
    agent-comms token rotate
    ```
 
-   The command writes a new token to the `link-token` file.
+   The command writes a new token to the `link-token` file. Then it tells
+   the running server to read the secrets again (see below).
 
-2. Restart every opencode process that runs the plugin.
-   A running plugin keeps the old token until it reloads.
+2. Make sure that each plugin connects again. The server closes all link
+   connections when the link tokens change. The plugin reads the
+   `link-token` file on each connection, thus it connects with the new
+   token. You do not have to restart opencode.
+
+After a change to the secrets, the command sends `SIGHUP` to the running
+server:
+
+- When the file `<data_dir>/agent-comms.pid` names a running server, the
+  command sends the signal to that process.
+- Otherwise, when the launchd service `local.agent-comms` is loaded, the
+  command uses `launchctl kill SIGHUP`.
+
+The command prints the result. On `SIGHUP`, the server reads
+`secrets.toml` again with the same checks as at startup. A revoked token or
+an old password stops working immediately:
+
+- When the link tokens change, the server closes all link connections.
+  Each link must authenticate again with a current token.
+- When the operator account or password changes, the server closes all
+  operator sessions. Log in again with the new password.
+
+When the new file is not correct, the server keeps the current secrets and
+writes a warning to the log. The log never contains secrets.
+
+To send the signal manually, use:
+
+```
+kill -HUP "$(cat <data_dir>/agent-comms.pid)"
+```
 
 Other token commands:
 
@@ -328,8 +367,10 @@ agent-comms operator-password
 ```
 
 The command makes a random password and prints it one time.
-Use `--password <PW>` to set a password. Use `--prompt` to type it.
-Restart the service after each change to secrets.
+To set a specific password, use `--password-stdin` to read it from the first
+line of stdin, or `--prompt` to type it. The command does not accept a
+password as an argument. After the change, the command tells the running
+server to read the secrets again. You do not have to restart the service.
 
 ## 8. TLS for non-loopback binds
 

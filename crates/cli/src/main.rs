@@ -1,6 +1,7 @@
 mod cli;
 mod install;
 mod launchd;
+mod notify;
 mod paths;
 mod secrets_file;
 mod serve;

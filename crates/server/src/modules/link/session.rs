@@ -22,6 +22,10 @@ const AUTH_WINDOW: Duration = Duration::from_secs(60);
 /// Time that a link has between its `BURST` and its `ENDBURST`.
 const BURST_TIMEOUT: Duration = Duration::from_secs(60);
 const PROTOCOL_VERSION: &str = "1";
+/// A link carries many accounts, and each account gets its own copy of each
+/// channel event. The link queue holds this many times the queue of one
+/// client connection (65536 lines with the default `outbound_queue`).
+const LINK_QUEUE_FACTOR: usize = 16;
 
 /// Start the task for a link connection whose first line is `first` (`LINK`).
 pub fn spawn(shared: Arc<LinkShared>, state: SharedState, conn: LineConn, first: Message) {
@@ -40,7 +44,12 @@ async fn run(shared: Arc<LinkShared>, state: SharedState, mut conn: LineConn, fi
     };
     let name = first.params[1].clone();
 
-    let (outbound, rx) = Outbound::new(state.config.limits.outbound_queue);
+    let queue = state
+        .config
+        .limits
+        .outbound_queue
+        .saturating_mul(LINK_QUEUE_FACTOR);
+    let (outbound, rx) = Outbound::new(queue);
     let (reader, writer, _, _) = conn.into_parts();
     let writer_task = spawn_writer(writer, rx, outbound.clone());
 
@@ -258,10 +267,32 @@ async fn session(
             Err(e) => return violation(ctx, &e.to_string()),
         };
 
-        if let Err(reason) = dispatch(shared, state, ctx, &msg, &mut burst_started) {
-            return violation(ctx, reason);
+        match dispatch(shared, state, ctx, &msg, &mut burst_started) {
+            Err(reason) => return violation(ctx, reason),
+            Ok(Next::Continue) => {}
+            Ok(Next::ServerBurst) => {
+                // The replay waits for queue space (backpressure).
+                super::replay::server_burst(shared, state, ctx).await;
+                if out.is_closed() {
+                    return out.close_reason().unwrap_or_else(|| "link closed".into());
+                }
+                ctx.phase = LinkPhase::Established;
+                ctx.entry.established = true;
+                for ext in shared.hub.extensions() {
+                    ext.on_link_up(state, &ctx.entry);
+                }
+                // The link waits for the server burst: that time is not idle time.
+                last_rx = Instant::now();
+            }
         }
     }
+}
+
+/// What the session does after a dispatched line.
+enum Next {
+    Continue,
+    /// `ENDBURST` from the link: send the server burst.
+    ServerBurst,
 }
 
 /// Queue `ERROR :<reason>` (the caller closes the link). Returns the reason.
@@ -277,7 +308,7 @@ fn dispatch(
     ctx: &mut LinkCtx,
     msg: &Message,
     burst_started: &mut Option<Instant>,
-) -> Result<(), &'static str> {
+) -> Result<Next, &'static str> {
     let verb = msg.command_upper();
     match verb.as_str() {
         "PING" => {
@@ -285,9 +316,9 @@ fn dispatch(
                 Some(token) => ctx.reply(msg, Message::new("PONG", vec![token.clone()])),
                 None => ctx.fail(msg, "INVALID_PARAMS", &[], "Missing token"),
             }
-            return Ok(());
+            return Ok(Next::Continue);
         }
-        "PONG" => return Ok(()),
+        "PONG" => return Ok(Next::Continue),
         "LINK" => return Err("not allowed in this state"),
         "BURST" => {
             if ctx.phase != LinkPhase::Linked {
@@ -295,7 +326,7 @@ fn dispatch(
             }
             ctx.phase = LinkPhase::Bursting;
             *burst_started = Some(Instant::now());
-            return Ok(());
+            return Ok(Next::Continue);
         }
         _ => {}
     }
@@ -317,12 +348,7 @@ fn dispatch(
             }
             ctx.phase = LinkPhase::Syncing;
             *burst_started = None;
-            super::replay::server_burst(shared, state, ctx);
-            ctx.phase = LinkPhase::Established;
-            ctx.entry.established = true;
-            for ext in shared.hub.extensions() {
-                ext.on_link_up(state, &ctx.entry);
-            }
+            return Ok(Next::ServerBurst);
         }
         "INTRODUCE" | "RENAME" | "RETIRE" | "STATE" => {
             super::accounts::handle(shared, state, ctx, msg);
@@ -339,7 +365,7 @@ fn dispatch(
             }
         }
     }
-    Ok(())
+    Ok(Next::Continue)
 }
 
 /// Cancel-safe line reader over the reader half of the link connection.

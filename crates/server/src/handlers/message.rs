@@ -7,11 +7,16 @@ use crate::util::{fold, format_time_ms, new_msgid};
 use agent_comms_proto::{numeric, Message, Tags, TAG_VENDOR};
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 /// Maximum number of targets in one comma list.
 const MAX_TARGETS: usize = 4;
 /// Maximum number of lines in one multiline batch.
 const MAX_LINES: usize = 200;
+/// Maximum number of buffered text bytes in all open batches together.
+const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+/// An open batch older than this is dropped.
+const BATCH_TTL: Duration = Duration::from_secs(60);
 const CONCAT_TAG: &str = "draft/multiline-concat";
 /// Vendor tags that only the server sets.
 const AUTHORITY_TAGS: &[&str] = &["role", "parent", "rel", "broadcast"];
@@ -28,19 +33,79 @@ struct PendingBatch {
     lines: Vec<(String, bool)>,
     count: usize,
     bytes: usize,
+    /// Text bytes stored in `lines`.
+    stored: usize,
     invalid: bool,
+    opened: Instant,
 }
 
-/// Open batches, keyed by server instance and user.
-type PendingMap = HashMap<(usize, UserId), PendingBatch>;
+impl PendingBatch {
+    fn expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.opened) >= BATCH_TTL
+    }
+}
 
-fn pending() -> &'static parking_lot::Mutex<PendingMap> {
-    static PENDING: OnceLock<parking_lot::Mutex<PendingMap>> = OnceLock::new();
-    PENDING.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+/// Open batches (at most one for each user), keyed by server instance and
+/// user, and the total of their stored bytes.
+#[derive(Default)]
+struct Pending {
+    map: HashMap<(usize, UserId), PendingBatch>,
+    total: usize,
+}
+
+impl Pending {
+    fn remove(&mut self, k: &(usize, UserId)) -> Option<PendingBatch> {
+        let p = self.map.remove(k)?;
+        self.total = self.total.saturating_sub(p.stored);
+        Some(p)
+    }
+
+    /// Drop expired batches (of one server instance only when `only` is
+    /// Some). Returns the number of dropped batches.
+    fn sweep(&mut self, now: Instant, only: Option<usize>) -> usize {
+        let old: Vec<(usize, UserId)> = self
+            .map
+            .iter()
+            .filter(|(k, p)| only.is_none_or(|s| k.0 == s) && p.expired(now))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in &old {
+            self.remove(k);
+        }
+        old.len()
+    }
+}
+
+fn pending() -> &'static parking_lot::Mutex<Pending> {
+    static PENDING: OnceLock<parking_lot::Mutex<Pending>> = OnceLock::new();
+    PENDING.get_or_init(|| parking_lot::Mutex::new(Pending::default()))
+}
+
+fn state_key(state: &ServerState) -> usize {
+    state as *const ServerState as usize
 }
 
 fn key(cx: &Cx<'_>, uid: UserId) -> (usize, UserId) {
-    (cx.state as *const ServerState as usize, uid)
+    (state_key(cx.state), uid)
+}
+
+/// Drop the open batch of `uid` (call when the user leaves).
+pub fn forget_user(state: &ServerState, uid: UserId) {
+    pending().lock().remove(&(state_key(state), uid));
+}
+
+/// Number of open batches of this server instance (for tests).
+#[doc(hidden)]
+pub fn pending_batch_count(state: &ServerState) -> usize {
+    let s = state_key(state);
+    pending().lock().map.keys().filter(|k| k.0 == s).count()
+}
+
+/// Drop the batches of this server instance that are expired at `now`.
+/// Returns the number of dropped batches (for tests).
+#[doc(hidden)]
+pub fn sweep_pending(state: &ServerState, now: Instant) -> usize {
+    pending().lock().sweep(now, Some(state_key(state)))
 }
 
 pub fn handle(cx: &mut Cx<'_>, uid: UserId, msg: &Message) -> bool {
@@ -322,29 +387,56 @@ fn open_batch(cx: &mut Cx<'_>, uid: UserId, reference: &str, msg: &Message) {
     });
     let tags = sender_tags(cx, uid, msg);
     let k = key(cx, uid);
-    pending().lock().insert(
-        k,
-        PendingBatch {
-            reference: reference.to_string(),
-            target: target.to_string(),
-            command: None,
-            tags,
-            label,
-            lines: Vec::new(),
-            count: 0,
-            bytes: 0,
-            invalid: false,
-        },
-    );
+    let now = Instant::now();
+    let replaced = {
+        let mut pend = pending().lock();
+        pend.sweep(now, None);
+        let old = pend.remove(&k);
+        pend.map.insert(
+            k,
+            PendingBatch {
+                reference: reference.to_string(),
+                target: target.to_string(),
+                command: None,
+                tags,
+                label,
+                lines: Vec::new(),
+                count: 0,
+                bytes: 0,
+                stored: 0,
+                invalid: false,
+                opened: now,
+            },
+        );
+        old.map(|p| p.reference)
+    };
+    if let Some(old) = replaced {
+        fail(
+            cx,
+            uid,
+            vec![
+                "MULTILINE_INVALID".into(),
+                format!("Batch {old} was discarded by a new batch"),
+            ],
+        );
+    }
 }
 
 fn collect_line(cx: &mut Cx<'_>, uid: UserId, cmd: &str, msg: &Message) {
     let reference = msg.tag("batch").unwrap_or("");
     let max = cx.config().limits.max_message_bytes;
     let k = key(cx, uid);
-    let mut map = pending().lock();
-    let Some(p) = map.get_mut(&k).filter(|p| p.reference == reference) else {
-        drop(map);
+    let has_tags = cx
+        .world
+        .user(uid)
+        .is_some_and(|u| u.has_cap("message-tags"));
+    let mut guard = pending().lock();
+    if guard.map.get(&k).is_some_and(|p| p.expired(Instant::now())) {
+        guard.remove(&k);
+    }
+    let pend = &mut *guard;
+    let Some(p) = pend.map.get_mut(&k).filter(|p| p.reference == reference) else {
+        drop(guard);
         fail(
             cx,
             uid,
@@ -366,11 +458,7 @@ fn collect_line(cx: &mut Cx<'_>, uid: UserId, cmd: &str, msg: &Message) {
     }
     if p.command.is_none() {
         p.command = Some(cmd.to_string());
-        let extra = if cx
-            .world
-            .user(uid)
-            .is_some_and(|u| u.has_cap("message-tags"))
-        {
+        let extra = if has_tags {
             client_tags(msg)
         } else {
             Vec::new()
@@ -388,21 +476,37 @@ fn collect_line(cx: &mut Cx<'_>, uid: UserId, cmd: &str, msg: &Message) {
     p.count += 1;
     // Stop storing text after a limit is exceeded; the close reports it.
     if p.count <= MAX_LINES && p.bytes <= max {
+        if pend.total.saturating_add(text.len()) > MAX_PENDING_BYTES {
+            pend.remove(&k);
+            drop(guard);
+            fail(
+                cx,
+                uid,
+                vec![
+                    "MULTILINE_MAX_BYTES".into(),
+                    MAX_PENDING_BYTES.to_string(),
+                    "Server multiline buffer is full".into(),
+                ],
+            );
+            return;
+        }
         p.lines.push((text.to_string(), concat));
+        p.stored += text.len();
+        pend.total += text.len();
     }
 }
 
 fn close_batch(cx: &mut Cx<'_>, uid: UserId, reference: &str) {
     let k = key(cx, uid);
     let p = {
-        let mut map = pending().lock();
-        if map.get(&k).is_some_and(|p| p.reference == reference) {
-            map.remove(&k)
+        let mut pend = pending().lock();
+        if pend.map.get(&k).is_some_and(|p| p.reference == reference) {
+            pend.remove(&k)
         } else {
             None
         }
     };
-    let Some(p) = p else {
+    let Some(p) = p.filter(|p| !p.expired(Instant::now())) else {
         fail(
             cx,
             uid,

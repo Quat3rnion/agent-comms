@@ -284,12 +284,16 @@ fn ping(cx: &mut Cx<'_>, uid: UserId, msg: &Message) {
 // ---------------------------------------------------------------- completion
 
 /// Complete registration when NICK and USER are known and CAP negotiation
-/// is not in progress.
-fn try_complete(cx: &mut Cx<'_>, uid: UserId) {
+/// is not in progress. A SASL verification that runs also delays
+/// completion; `sasl::run_pending` calls this again with the result.
+pub fn try_complete(cx: &mut Cx<'_>, uid: UserId) {
     let Some(u) = cx.world.user(uid) else {
         return;
     };
     if u.registered || !u.reg.nick_set || !u.reg.user_set || u.reg.cap_negotiating {
+        return;
+    }
+    if u.reg.sasl.as_ref().is_some_and(|s| s.verifying) {
         return;
     }
     if cx.config().require_sasl && u.account.is_none() {

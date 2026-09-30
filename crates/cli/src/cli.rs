@@ -65,9 +65,13 @@ pub struct InstallArgs {
     /// Do not write or load the launchd service.
     #[arg(long)]
     pub no_launchd: bool,
-    /// Use this operator password instead of a random one.
-    #[arg(long, value_name = "PW")]
-    pub operator_password: Option<String>,
+    /// Read the operator password from the first line of stdin
+    /// instead of a random one.
+    #[arg(long, conflicts_with = "prompt")]
+    pub password_stdin: bool,
+    /// Read the operator password from the terminal instead of a random one.
+    #[arg(long)]
+    pub prompt: bool,
     /// Listen port for a new config file.
     #[arg(long, value_name = "PORT")]
     pub port: Option<u16>,
@@ -90,9 +94,10 @@ pub enum TokenCmd {
 
 #[derive(Debug, Args)]
 pub struct OperatorPasswordArgs {
-    /// New password. Default: a random password.
-    #[arg(long, value_name = "PW", conflicts_with = "prompt")]
-    pub password: Option<String>,
+    /// Read the new password from the first line of stdin.
+    /// Default: a random password, printed one time.
+    #[arg(long, conflicts_with = "prompt")]
+    pub password_stdin: bool,
     /// Read the new password from the terminal.
     #[arg(long)]
     pub prompt: bool,

@@ -91,7 +91,7 @@ impl Store {
     /// Set the deadline of every claim of `account`. Returns the updated claims.
     pub fn refresh_claims_of(&self, account: &str, deadline: i64) -> StoreResult<Vec<ClaimRow>> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         tx.execute(
             "UPDATE claims SET deadline = ?2 WHERE holder_account = ?1",
             params![account, deadline],

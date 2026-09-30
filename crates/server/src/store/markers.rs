@@ -26,7 +26,7 @@ impl Store {
         time_ms: i64,
     ) -> StoreResult<i64> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         tx.execute(
             "INSERT INTO read_markers (account, target_fold, target, time_ms) \
              VALUES (?1, ?2, ?3, ?4) \

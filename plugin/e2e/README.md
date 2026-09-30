@@ -75,7 +75,7 @@ model.script("add-login", [
 1. It creates a temp config directory.
 2. It writes `config.toml` with a free `bind` port, `data_dir`, `secrets_path`, `require_sasl = true`,
    and small limits (for example `claim_idle_secs = 60`).
-3. It runs `agent-comms install --no-launchd --operator-password <pw>`.
+3. It runs `agent-comms install --no-launchd --password-stdin (password on stdin)`.
    This writes `secrets.toml` (mode 0600) and the `link-token` file.
    The config file exists before this step. So `install` never writes to the real data directory.
 4. It starts `agent-comms serve` and waits until the port accepts connections.

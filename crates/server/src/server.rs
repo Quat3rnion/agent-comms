@@ -77,6 +77,55 @@ impl Running {
         self.state.clone()
     }
 
+    /// Replace the secrets of the running server. The link module does not
+    /// record which credential a link used, so when the link credentials
+    /// change, all links close and must authenticate again. Operator socket
+    /// sessions close when the operator account or password changes.
+    pub fn reload_secrets(&self, secrets: Secrets) {
+        let (links_changed, operator_changed) = {
+            let mut current = self.state.secrets.write();
+            let links_changed = current.links != secrets.links;
+            let operator_changed = current.operator != secrets.operator;
+            *current = secrets;
+            (links_changed, operator_changed)
+        };
+        let operator_account = self
+            .state
+            .secrets
+            .read()
+            .operator
+            .as_ref()
+            .map(|o| o.account.clone());
+
+        let mut closed_links = std::collections::HashSet::new();
+        let mut closed_operators = 0usize;
+        let w = self.state.world.lock();
+        for u in w.users.values() {
+            match &u.sink {
+                Sink::Virtual { link: Some(l), .. } if links_changed => {
+                    if closed_links.insert(l.name.clone()) {
+                        l.tx.close_with("credentials changed");
+                    }
+                }
+                Sink::Socket(o) if u.role == crate::user::Role::Operator => {
+                    let still_valid =
+                        !operator_changed && u.account.is_some() && u.account == operator_account;
+                    if !still_valid {
+                        o.close_with("credentials changed");
+                        closed_operators += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        drop(w);
+        tracing::info!(
+            links_closed = closed_links.len(),
+            operator_sessions_closed = closed_operators,
+            "secrets reloaded"
+        );
+    }
+
     /// Stop the accept loop and the tick task, and close all connections.
     pub async fn shutdown(self) -> anyhow::Result<()> {
         let _ = self.shutdown_tx.send(true);
@@ -203,5 +252,30 @@ pub async fn run(
     let modules = default_modules(&config)?;
     let running = start_with(config, secrets, modules).await?;
     shutdown.await;
+    running.shutdown().await
+}
+
+/// Run the server with the default modules until `shutdown` completes.
+/// Each value from `reload` replaces the secrets (see
+/// [`Running::reload_secrets`]).
+pub async fn run_with_reload(
+    config: Config,
+    secrets: Secrets,
+    shutdown: impl Future<Output = ()> + Send,
+    mut reload: tokio::sync::mpsc::Receiver<Secrets>,
+) -> anyhow::Result<()> {
+    let modules = default_modules(&config)?;
+    let running = start_with(config, secrets, modules).await?;
+    tokio::pin!(shutdown);
+    let mut reload_open = true;
+    loop {
+        tokio::select! {
+            _ = &mut shutdown => break,
+            next = reload.recv(), if reload_open => match next {
+                Some(s) => running.reload_secrets(s),
+                None => reload_open = false,
+            },
+        }
+    }
     running.shutdown().await
 }

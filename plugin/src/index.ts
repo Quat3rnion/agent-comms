@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto"
 import { realpathSync } from "node:fs"
 import { hostname } from "node:os"
+import { resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { handleAgentRequest } from "./agent.ts"
 import type { AgentDeps } from "./agent.ts"
@@ -14,6 +15,7 @@ import {
   FamilyIndex,
   canonicalPath,
   claimLine,
+  compileGlob,
   decideEdit,
   extractEditPaths,
   extractPermissionPaths,
@@ -924,9 +926,12 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     sessionID: string,
     ev: { action: string; resources: readonly string[]; metadata?: Record<string, unknown> | undefined },
   ): Promise<EditDecision> {
-    const paths = extractPermissionPaths(ev, options.editActions)
-    if (paths === null || paths.length === 0) return { effect: "allow" }
-    const canon = canonicalize(sessionID, paths)
+    const dir = registry.directoryOf(sessionID) ?? ourDir
+    const exists = (p: string): boolean => realpath(resolve(dir, p)) !== null
+    const extracted = extractPermissionPaths(ev, options.editActions, exists)
+    if (extracted === null) return { effect: "allow" }
+    const canon = canonicalize(sessionID, extracted.paths)
+    const globs = extracted.unresolved.map((g) => compileGlob(g, dir, realpath))
     if (!link.connected) await link.waitConnected(options.graceMs)
     const rec = registry.get(sessionID) ?? (await adopt(sessionID))
     const account = rec && !rec.optedOut ? rec.account : null
@@ -935,6 +940,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
       account,
       sessionFamilyAccount: familyAccount,
       paths: canon,
+      unresolved: globs,
       cache,
       family,
       linkState: link.state,

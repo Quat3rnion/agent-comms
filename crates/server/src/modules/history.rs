@@ -751,9 +751,8 @@ impl Module for HistoryModule {
             lines,
             dm_account,
         };
-        if let Err(e) = self.store.insert_message(&nm, &accounts) {
-            tracing::warn!("storing message {} failed: {e}", ev.msgid);
-        }
+        // Deferred: this runs under the world lock (see `Store`).
+        self.store.insert_message_deferred(&nm, &accounts);
     }
 
     fn on_join(&self, cx: &mut Cx<'_>, uid: UserId, channel: &str) {

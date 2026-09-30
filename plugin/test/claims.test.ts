@@ -5,6 +5,7 @@ import {
   FamilyIndex,
   canonicalPath,
   claimLine,
+  compileGlob,
   decideEdit,
   extractEditPaths,
   extractPermissionPaths,
@@ -339,16 +340,132 @@ describe("extractEditPaths", () => {
 
 describe("extractPermissionPaths", () => {
   const actions = ["edit"]
+  const none = () => false
   test("null for other actions", () => {
-    expect(extractPermissionPaths({ action: "bash", resources: ["ls"] }, actions)).toBeNull()
+    expect(extractPermissionPaths({ action: "bash", resources: ["ls"] }, actions, none)).toBeNull()
   })
-  test("drops globs and adds metadata", () => {
+  test("globs are unresolved, literals and metadata are paths", () => {
     expect(
       extractPermissionPaths(
-        { action: "edit", resources: ["/w/a.ts", "/w/**/*.ts", "/w/q?.ts", "/w/[x].ts"], metadata: { filePath: "/w/b.ts", path: "/w/a.ts" } },
+        {
+          action: "edit",
+          resources: ["/w/a.ts", "/w/**/*.ts", "/w/q?.ts", "/w/[x].ts"],
+          metadata: { filePath: "/w/b[1].ts", path: "/w/a.ts" },
+        },
         actions,
+        none,
       ),
-    ).toEqual(["/w/a.ts", "/w/b.ts"])
-    expect(extractPermissionPaths({ action: "edit", resources: [] }, actions)).toEqual([])
+    ).toEqual({
+      paths: ["/w/a.ts", "/w/**/*.ts", "/w/q?.ts", "/w/[x].ts", "/w/b[1].ts"],
+      unresolved: ["/w/**/*.ts", "/w/q?.ts", "/w/[x].ts"],
+    })
+    expect(extractPermissionPaths({ action: "edit", resources: [] }, actions, none)).toEqual({
+      paths: [],
+      unresolved: [],
+    })
+  })
+  test("an existing file with brackets is a literal path", () => {
+    const exists = (p: string) => p === "src/routes/[id].ts"
+    expect(
+      extractPermissionPaths({ action: "edit", resources: ["src/routes/[id].ts", "src/[a-z].ts"] }, actions, exists),
+    ).toEqual({ paths: ["src/routes/[id].ts", "src/[a-z].ts"], unresolved: ["src/[a-z].ts"] })
+  })
+  test("a throwing exists check keeps the glob unresolved", () => {
+    const boom = () => {
+      throw new Error("boom")
+    }
+    expect(extractPermissionPaths({ action: "edit", resources: ["src/*.ts"] }, actions, boom)?.unresolved).toEqual([
+      "src/*.ts",
+    ])
+  })
+})
+
+describe("compileGlob", () => {
+  const noReal = () => null
+  test("star, globstar, question mark, class, braces", () => {
+    const g = compileGlob("src/**/*.ts", "/w", noReal)
+    expect(g.matches("/w/src/a.ts")).toBe(true)
+    expect(g.matches("/w/src/x/y/a.ts")).toBe(true)
+    expect(g.matches("/w/lib/a.ts")).toBe(false)
+    expect(g.matches("/w/src/a.tsx")).toBe(false)
+    const s = compileGlob("src/*.ts", "/w", noReal)
+    expect(s.matches("/w/src/a.ts")).toBe(true)
+    expect(s.matches("/w/src/x/a.ts")).toBe(false)
+    const q = compileGlob("/w/q?.ts", "/", noReal)
+    expect(q.matches("/w/q1.ts")).toBe(true)
+    expect(q.matches("/w/q12.ts")).toBe(false)
+    const c = compileGlob("/w/[a-c].ts", "/", noReal)
+    expect(c.matches("/w/b.ts")).toBe(true)
+    expect(c.matches("/w/d.ts")).toBe(false)
+    const b = compileGlob("/w/{a,b}.ts", "/", noReal)
+    expect(b.matches("/w/a.ts")).toBe(true)
+    expect(b.matches("/w/c.ts")).toBe(false)
+  })
+  test("the literal directory part is canonicalised", () => {
+    const realpath = (p: string) => (p === "/link" ? "/real" : null)
+    const g = compileGlob("/link/src/*.ts", "/", realpath)
+    expect(g.matches("/real/src/a.ts")).toBe(true)
+    expect(g.matches("/link/src/a.ts")).toBe(false)
+  })
+  test("an existing directory with brackets is literal", () => {
+    const realpath = (p: string) => (p === "/w/[id]" ? p : null)
+    const g = compileGlob("/w/[id]/*.ts", "/", realpath)
+    expect(g.matches("/w/[id]/a.ts")).toBe(true)
+    expect(g.matches("/w/i/a.ts")).toBe(false)
+  })
+})
+
+describe("decideEdit with globs and empty targets", () => {
+  const NOW = 1_700_000_000
+  const cache = new ClaimCache()
+  cache.apply(set("holder", "docs-bot", NOW - 60, NOW + 400, "/w/src/routes/[id].ts"))
+  cache.apply(set("holder", "docs-bot", NOW - 60, NOW + 400, "/w/src/deep/b.ts"))
+  const base = {
+    account: "me" as string | null,
+    sessionFamilyAccount: null as string | null,
+    paths: [] as string[],
+    cache,
+    family: new FamilyIndex(),
+    linkState: "established" as const,
+    failMode: "ask" as const,
+    nowSec: NOW,
+  }
+  const glob = (p: string) => compileGlob(p, "/w", () => null)
+
+  test("literal bracket path claimed by another agent denies", () => {
+    expect(decideEdit({ ...base, paths: ["/w/src/routes/[id].ts"] }).effect).toBe("deny")
+  })
+
+  test("glob that matches a claimed path denies", () => {
+    const d = decideEdit({ ...base, unresolved: [glob("src/**/*.ts")] })
+    expect(d.effect).toBe("deny")
+    if (d.effect === "deny") expect(d.message).toContain("/w/src/deep/b.ts is claimed by docs-bot")
+  })
+
+  test("glob with no match and empty targets allow while established", () => {
+    expect(decideEdit({ ...base, unresolved: [glob("lib/**/*.ts")] }).effect).toBe("allow")
+    expect(decideEdit({ ...base }).effect).toBe("allow")
+  })
+
+  test("offline: globs and empty targets follow failMode", () => {
+    for (const unresolved of [[glob("lib/*.ts")], []]) {
+      const input = { ...base, linkState: "down" as const, unresolved }
+      expect(decideEdit({ ...input, failMode: "deny" }).effect).toBe("deny")
+      expect(decideEdit({ ...input, failMode: "ask" }).effect).toBe("ask")
+      expect(decideEdit({ ...input, failMode: "open" }).effect).toBe("allow")
+    }
+    expect(decideEdit({ ...base, linkState: "down", failMode: "ask" })).toEqual({
+      effect: "ask",
+      message: "IRC server unreachable: claims cannot be checked. Allow this edit?",
+    })
+    expect(decideEdit({ ...base, linkState: "down", failMode: "ask", unresolved: [glob("lib/*.ts")] })).toEqual({
+      effect: "ask",
+      message: "IRC server unreachable: claims cannot be checked. Allow this edit of lib/*.ts?",
+    })
+  })
+
+  test("offline ask: a glob that matches a cached claim denies", () => {
+    const d = decideEdit({ ...base, linkState: "down", failMode: "ask", unresolved: [glob("src/**")] })
+    expect(d.effect).toBe("deny")
   })
 })

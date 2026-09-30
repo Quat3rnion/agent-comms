@@ -77,6 +77,22 @@ fn install_creates_files_with_private_modes() {
 fn install_uses_given_operator_password() {
     let tmp = TempDir::new().unwrap();
     cmd(&tmp)
+        .args(["install", "--no-launchd", "--password-stdin"])
+        .write_stdin("hunter2hunter2\n")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("hunter2hunter2").not());
+    let secrets = read_secrets(&tmp);
+    assert!(verify(
+        &secrets.operator.unwrap().password_hash,
+        "hunter2hunter2"
+    ));
+}
+
+#[test]
+fn install_rejects_value_bearing_password_flag() {
+    let tmp = TempDir::new().unwrap();
+    cmd(&tmp)
         .args([
             "install",
             "--no-launchd",
@@ -84,12 +100,17 @@ fn install_uses_given_operator_password() {
             "hunter2hunter2",
         ])
         .assert()
-        .success();
-    let secrets = read_secrets(&tmp);
-    assert!(verify(
-        &secrets.operator.unwrap().password_hash,
-        "hunter2hunter2"
-    ));
+        .failure();
+}
+
+#[test]
+fn install_rejects_empty_stdin_password() {
+    let tmp = TempDir::new().unwrap();
+    cmd(&tmp)
+        .args(["install", "--no-launchd", "--password-stdin"])
+        .write_stdin("\n")
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -217,12 +238,151 @@ fn operator_password_updates_hash() {
     let tmp = TempDir::new().unwrap();
     install(&tmp);
     cmd(&tmp)
-        .args(["operator-password", "--password", "new-password-123"])
+        .args(["operator-password", "--password-stdin"])
+        .write_stdin("new-password-123\r\n")
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains("new-password-123").not());
     let secrets = read_secrets(&tmp);
     assert!(verify(
         &secrets.operator.unwrap().password_hash,
         "new-password-123"
     ));
+}
+
+#[test]
+fn operator_password_default_generates_and_prints() {
+    let tmp = TempDir::new().unwrap();
+    install(&tmp);
+    let out = cmd(&tmp)
+        .arg("operator-password")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("shown once"))
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    let line = out.lines().find(|l| l.contains("shown once")).unwrap();
+    let password = line.rsplit(' ').next().unwrap();
+    let secrets = read_secrets(&tmp);
+    assert!(verify(&secrets.operator.unwrap().password_hash, password));
+}
+
+#[test]
+fn operator_password_rejects_value_flag() {
+    let tmp = TempDir::new().unwrap();
+    install(&tmp);
+    cmd(&tmp)
+        .args(["operator-password", "--password", "new-password-123"])
+        .assert()
+        .failure();
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn send_signal(pid: u32, sig: &str) {
+    let status = std::process::Command::new("kill")
+        .args([sig, &pid.to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+fn wait_exit(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = child.try_wait().unwrap() {
+            return Some(status);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    None
+}
+
+#[test]
+fn serve_writes_pid_file_and_reloads_on_sighup() {
+    let tmp = TempDir::new().unwrap();
+    let dir = config_dir(&tmp);
+    let data = tmp.path().join("serve-data");
+    let port = free_port();
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("config.toml"),
+        format!(
+            "bind = \"127.0.0.1:{port}\"\ndata_dir = \"{}\"\n",
+            data.display()
+        ),
+    )
+    .unwrap();
+    install(&tmp);
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_agent-comms"))
+        .env("HOME", tmp.path())
+        .env("XDG_DATA_HOME", tmp.path().join("data"))
+        .env("XDG_CONFIG_HOME", tmp.path().join("xdg-config"))
+        .env_remove("AGENT_COMMS_CONFIG_DIR")
+        .env_remove("RUST_LOG")
+        .arg("--config-dir")
+        .arg(&dir)
+        .arg("serve")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("serve exited early: {status}");
+        }
+        assert!(std::time::Instant::now() < deadline, "serve did not listen");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let pid_path = data.join("agent-comms.pid");
+    assert_eq!(
+        fs::read_to_string(&pid_path).unwrap().trim(),
+        pid.to_string()
+    );
+    assert_eq!(mode(&pid_path), 0o600);
+
+    // Change the secrets. The command signals the server through the pid file.
+    cmd(&tmp)
+        .args(["token", "rotate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!("pid {pid}")));
+    send_signal(pid, "-HUP");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "serve exited after SIGHUP"
+    );
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_ok());
+
+    send_signal(pid, "-TERM");
+    let status = wait_exit(&mut child, std::time::Duration::from_secs(20));
+    let status = match status {
+        Some(s) => s,
+        None => {
+            let _ = child.kill();
+            panic!("serve did not exit after SIGTERM");
+        }
+    };
+    assert!(status.success(), "serve exit status {status}");
+    assert!(!pid_path.exists(), "pid file not removed");
 }

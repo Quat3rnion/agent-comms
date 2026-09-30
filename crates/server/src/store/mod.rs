@@ -15,6 +15,7 @@ mod messages;
 mod schema;
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use parking_lot::Mutex;
@@ -42,9 +43,120 @@ pub enum StoreError {
     Conflict(String),
 }
 
+/// Time between two group commits.
+const COMMIT_INTERVAL: Duration = Duration::from_millis(10);
+
 /// The SQLite store. One connection behind a mutex.
+///
+/// Store calls run under the world lock, so the hot path must not wait for
+/// disk I/O:
+/// - Deferred writes: the writes of each message (`insert_message_deferred`,
+///   `set_cursors`, `touch`) go into a queue. A background thread applies the
+///   queue every `COMMIT_INTERVAL`. Every other store call applies the queue
+///   first, so each call sees all earlier writes.
+/// - Group commit: store calls run inside one open transaction, and the
+///   background thread commits it every `COMMIT_INTERVAL` (and on drop).
+///   Other connections see the writes after the next commit.
 pub struct Store {
+    conn: Db,
+    /// Next message `seq` (allocated at insert time, before the write).
+    next_seq: Mutex<i64>,
+    /// `(msgid, seq)` of the last inserted message.
+    last_insert: Mutex<Option<(String, i64)>>,
+}
+
+/// A write that waits in the queue.
+type Op = Box<dyn FnOnce(&mut Connection) -> StoreResult<()> + Send>;
+
+struct DbInner {
     conn: Mutex<Connection>,
+    queue: Mutex<Vec<(&'static str, Op)>>,
+}
+
+/// The connection and the write queue, shared with the commit thread.
+struct Db(Arc<DbInner>);
+
+impl Db {
+    fn new(conn: Connection) -> Db {
+        let db = Arc::new(DbInner {
+            conn: Mutex::new(conn),
+            queue: Mutex::new(Vec::new()),
+        });
+        let weak = Arc::downgrade(&db);
+        let spawned = std::thread::Builder::new()
+            .name("store-commit".into())
+            .spawn(move || loop {
+                std::thread::sleep(COMMIT_INTERVAL);
+                let Some(db) = weak.upgrade() else {
+                    return;
+                };
+                let queued = !db.queue.lock().is_empty();
+                let open = !db.conn.lock().is_autocommit();
+                if queued || open {
+                    commit(&mut Db::lock_inner(&db));
+                }
+            });
+        if let Err(e) = spawned {
+            tracing::warn!("store: cannot start the commit thread: {e}");
+        }
+        Db(db)
+    }
+
+    /// Queue a write. It does not wait for the connection.
+    fn defer(&self, what: &'static str, op: Op) {
+        self.0.queue.lock().push((what, op));
+    }
+
+    /// Lock the connection, start the shared transaction if none is open,
+    /// and apply the queued writes.
+    fn lock(&self) -> DbGuard<'_> {
+        Db::lock_inner(&self.0)
+    }
+
+    fn lock_inner(db: &DbInner) -> DbGuard<'_> {
+        let mut guard = db.conn.lock();
+        let ops = std::mem::take(&mut *db.queue.lock());
+        if guard.is_autocommit() {
+            if let Err(e) = guard.execute_batch("BEGIN") {
+                tracing::warn!("store: BEGIN failed: {e}");
+            }
+        }
+        for (what, op) in ops {
+            if let Err(e) = op(&mut guard) {
+                tracing::warn!("store: deferred {what} failed: {e}");
+            }
+        }
+        DbGuard(guard)
+    }
+}
+
+impl Drop for Db {
+    fn drop(&mut self) {
+        commit(&mut self.lock());
+    }
+}
+
+fn commit(conn: &mut Connection) {
+    if !conn.is_autocommit() {
+        if let Err(e) = conn.execute_batch("COMMIT") {
+            tracing::warn!("store: group commit failed: {e}");
+        }
+    }
+}
+
+struct DbGuard<'a>(parking_lot::MutexGuard<'a, Connection>);
+
+impl std::ops::Deref for DbGuard<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for DbGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Connection {
+        &mut self.0
+    }
 }
 
 impl Store {
@@ -57,6 +169,10 @@ impl Store {
         }
         let conn = Connection::open(path)?;
         conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get::<_, String>(0))?;
+        // Store calls run under the world lock. In WAL mode, NORMAL does not
+        // sync at each commit (only at checkpoints) and the database stays
+        // consistent; a power loss can lose the last commits.
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         Self::init(conn)
     }
 
@@ -69,8 +185,17 @@ impl Store {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(Duration::from_secs(5))?;
         schema::migrate(&mut conn)?;
+        // AUTOINCREMENT never reuses a `seq`: start after the highest one.
+        let last_seq: i64 = conn.query_row(
+            "SELECT MAX(COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'messages'), 0), \
+             COALESCE((SELECT MAX(seq) FROM messages), 0))",
+            [],
+            |r| r.get(0),
+        )?;
         Ok(Store {
-            conn: Mutex::new(conn),
+            conn: Db::new(conn),
+            next_seq: Mutex::new(last_seq + 1),
+            last_insert: Mutex::new(None),
         })
     }
 

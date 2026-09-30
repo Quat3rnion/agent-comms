@@ -1,7 +1,7 @@
 //! Token and password generation, and the `token` and `operator-password` commands.
 
 use crate::cli::{OperatorPasswordArgs, TokenCmd};
-use crate::{paths, secrets_file};
+use crate::{notify, paths, secrets_file};
 use agent_comms_server::config::{LinkCredential, OperatorSecret, Secrets};
 use anyhow::{anyhow, bail, Result};
 use argon2::password_hash::{rand_core::OsRng as SaltRng, PasswordHasher, SaltString};
@@ -124,8 +124,9 @@ pub fn run(config_dir: &Path, cmd: TokenCmd) -> Result<()> {
             secrets_file::write_private_file(&token_path, token.as_bytes())?;
             println!("Rotated link token for \"{name}\".");
             println!("New token file: {}", token_path.display());
-            println!("Running plugins keep the old token. Restart opencode or reload the plugin.");
-            println!("The server checks the token on the next link connection.");
+            notify::reload_running_server(&config);
+            println!("The old token does not work after the server reloads its secrets.");
+            println!("A plugin reads the token file on each connection and reconnects with the new token.");
             Ok(())
         }
         TokenCmd::Revoke { name } => {
@@ -137,29 +138,46 @@ pub fn run(config_dir: &Path, cmd: TokenCmd) -> Result<()> {
             }
             secrets_file::write_secrets(&config.secrets_path, &secrets)?;
             println!("Revoked link credential \"{name}\".");
+            notify::reload_running_server(&config);
             Ok(())
         }
     }
 }
 
-pub fn operator_password(config_dir: &Path, args: &OperatorPasswordArgs) -> Result<()> {
-    let config = paths::load_config(config_dir, None)?;
-    let mut secrets = secrets_file::load_or_default(&config.secrets_path)?;
-    let (password, generated) = if let Some(p) = &args.password {
-        (p.clone(), false)
-    } else if args.prompt {
+/// Get a password from stdin (`--password-stdin`) or the terminal
+/// (`--prompt`). Returns None when neither is set.
+pub fn read_password(from_stdin: bool, prompt: bool) -> Result<Option<String>> {
+    let password = if from_stdin {
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|e| anyhow!("cannot read password from stdin: {e}"))?;
+        let trimmed = line.strip_suffix('\n').unwrap_or(&line);
+        let trimmed = trimmed.strip_suffix('\r').unwrap_or(trimmed);
+        trimmed.to_string()
+    } else if prompt {
         let first = rpassword::prompt_password("New operator password: ")?;
         let second = rpassword::prompt_password("Repeat password: ")?;
         if first != second {
             bail!("passwords do not match");
         }
-        (first, false)
+        first
     } else {
-        (generate_password(), true)
+        return Ok(None);
     };
     if password.is_empty() {
         bail!("password must not be empty");
     }
+    Ok(Some(password))
+}
+
+pub fn operator_password(config_dir: &Path, args: &OperatorPasswordArgs) -> Result<()> {
+    let config = paths::load_config(config_dir, None)?;
+    let mut secrets = secrets_file::load_or_default(&config.secrets_path)?;
+    let (password, generated) = match read_password(args.password_stdin, args.prompt)? {
+        Some(p) => (p, false),
+        None => (generate_password(), true),
+    };
     set_operator_password(&mut secrets, &password)?;
     secrets_file::create_private_dir(config_dir)?;
     secrets_file::write_secrets(&config.secrets_path, &secrets)?;
@@ -167,5 +185,6 @@ pub fn operator_password(config_dir: &Path, args: &OperatorPasswordArgs) -> Resu
     if generated {
         println!("New operator password (shown once): {password}");
     }
+    notify::reload_running_server(&config);
     Ok(())
 }

@@ -2,13 +2,14 @@
 
 use crate::flood::TokenBucket;
 use crate::ops;
+use crate::sasl;
 use crate::state::SharedState;
 use crate::user::{Outbound, Role, User, UserId};
 use crate::util::unix_now;
 use agent_comms_proto::{numeric, Limits, Message, ParseError};
 use std::collections::VecDeque;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
@@ -215,7 +216,16 @@ pub async fn run_client(state: SharedState, mut conn: LineConn) {
     });
     let writer_task = spawn_writer(writer, rx, out.clone());
 
-    let reason = session(&state, uid, &out, &mut reader, &mut linebuf, Some(first)).await;
+    let reason = session(
+        &state,
+        uid,
+        peer.ip(),
+        &out,
+        &mut reader,
+        &mut linebuf,
+        Some(first),
+    )
+    .await;
 
     state.with_world(|cx| ops::quit(cx, uid, &reason));
     out.close();
@@ -225,6 +235,7 @@ pub async fn run_client(state: SharedState, mut conn: LineConn) {
 async fn session(
     state: &SharedState,
     uid: UserId,
+    ip: IpAddr,
     out: &Outbound,
     reader: &mut BoxReader,
     linebuf: &mut LineBuf,
@@ -346,6 +357,12 @@ async fn session(
         }
 
         ops::dispatch_as(state, uid, msg);
+
+        // The next line is read only after the SASL result is applied, so a
+        // pipelined CAP END cannot complete registration before it.
+        if cmd == "AUTHENTICATE" {
+            sasl::run_pending(state, uid, ip).await;
+        }
     }
 }
 

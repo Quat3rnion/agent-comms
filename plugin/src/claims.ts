@@ -200,6 +200,12 @@ export interface DecideEditInput {
   sessionFamilyAccount: string | null
   /** Canonical paths. */
   paths: string[]
+  /**
+   * Globs that the edit targets. Every cached claim that matches one is checked.
+   * When the link is not established they cannot be checked, so failMode applies.
+   * An edit with no paths and no globs is also unchecked: failMode applies offline.
+   */
+  unresolved?: GlobMatcher[]
   cache: ClaimCache
   family: Family
   linkState: LinkState | "never"
@@ -216,7 +222,15 @@ function formatAge(seconds: number): string {
 }
 
 export function decideEdit(input: DecideEditInput): EditDecision {
-  const { account, sessionFamilyAccount, paths, cache, family, linkState, failMode, nowSec } = input
+  const { account, sessionFamilyAccount, cache, family, linkState, failMode, nowSec } = input
+  const globs = input.unresolved ?? []
+  const paths = [...input.paths]
+  if (globs.length > 0) {
+    for (const claim of cache.all()) {
+      if (!paths.includes(claim.path) && globs.some((g) => g.matches(claim.path))) paths.push(claim.path)
+    }
+  }
+  const targets = [...input.paths, ...globs.map((g) => g.pattern)]
 
   const isOther = (holder: string): boolean => {
     if (account !== null && holder === account) return false
@@ -267,7 +281,10 @@ export function decideEdit(input: DecideEditInput): EditDecision {
   }
   return {
     effect: "ask",
-    message: `IRC server unreachable: claims cannot be checked. Allow this edit of ${paths.join(", ")}?`,
+    message:
+      targets.length > 0
+        ? `IRC server unreachable: claims cannot be checked. Allow this edit of ${targets.join(", ")}?`
+        : "IRC server unreachable: claims cannot be checked. Allow this edit?",
   }
 }
 
@@ -402,21 +419,152 @@ export function extractEditPaths(tool: string, input: unknown, editTools: string
   return [...new Set(out)]
 }
 
+/** True when `s` has glob syntax: `*`, `?`, a `[...]` class, or a `{a,b}` alternation. */
+export function hasGlobSyntax(s: string): boolean {
+  return /[*?]/.test(s) || /\[[^\]]+\]/.test(s) || /\{[^}]*,[^}]*\}/.test(s)
+}
+
+export interface PermissionPaths {
+  /** Literal paths. They are checked against claims directly. */
+  paths: string[]
+  /** Glob patterns. Every claimed path that matches one is checked. */
+  unresolved: string[]
+}
+
+/**
+ * Paths of an edit permission event. Returns null for actions that are not edits.
+ * A resource is a glob only if it has glob syntax and no file of that literal name exists.
+ * A glob resource is also kept as a literal path, so a claim on that literal name still matches.
+ * Metadata `filePath` and `path` are always literal.
+ */
 export function extractPermissionPaths(
-  ev: { action: string; resources: readonly string[]; metadata?: Record<string, unknown> },
+  ev: { action: string; resources: readonly string[]; metadata?: Record<string, unknown> | undefined },
   editActions: string[],
-): string[] | null {
+  exists: (p: string) => boolean,
+): PermissionPaths | null {
   if (!editActions.includes(ev.action)) return null
-  const out: string[] = []
+  const paths: string[] = []
+  const unresolved: string[] = []
   for (const r of ev.resources) {
-    if (r !== "" && !/[*?[]/.test(r)) out.push(r)
+    if (r === "") continue
+    paths.push(r)
+    if (!hasGlobSyntax(r)) continue
+    let found = false
+    try {
+      found = exists(r)
+    } catch {
+      found = false
+    }
+    if (!found) unresolved.push(r)
   }
   const meta = ev.metadata
   if (meta) {
     for (const key of ["filePath", "path"] as const) {
       const v = meta[key]
-      if (typeof v === "string" && v !== "") out.push(v)
+      if (typeof v === "string" && v !== "") paths.push(v)
     }
   }
-  return [...new Set(out)]
+  return { paths: [...new Set(paths)], unresolved: [...new Set(unresolved)] }
+}
+
+// ---------------------------------------------------------------------------
+// Glob matching
+// ---------------------------------------------------------------------------
+
+export interface GlobMatcher {
+  /** The glob as the caller gave it. Used in messages. */
+  pattern: string
+  matches(path: string): boolean
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")
+}
+
+function globSource(glob: string): string {
+  let re = ""
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob.charAt(i)
+    if (c === "*") {
+      if (glob.charAt(i + 1) === "*") {
+        while (glob.charAt(i + 1) === "*") i++
+        if (glob.charAt(i + 1) === "/") {
+          re += "(?:.*/)?"
+          i++
+        } else {
+          re += ".*"
+        }
+      } else {
+        re += "[^/]*"
+      }
+    } else if (c === "?") {
+      re += "[^/]"
+    } else if (c === "[") {
+      const end = glob.indexOf("]", i + 2)
+      if (end === -1) {
+        re += "\\["
+        continue
+      }
+      let body = glob.slice(i + 1, end)
+      let negate = false
+      if (body.startsWith("!") || body.startsWith("^")) {
+        negate = true
+        body = body.slice(1)
+      }
+      body = body.replace(/[\\\]^[]/g, "\\$&")
+      re += negate ? `[^/${body}]` : `[${body}]`
+      i = end
+    } else if (c === "{") {
+      const end = glob.indexOf("}", i + 1)
+      if (end === -1) {
+        re += "\\{"
+        continue
+      }
+      const parts = glob.slice(i + 1, end).split(",")
+      re += `(?:${parts.map(globSource).join("|")})`
+      i = end
+    } else {
+      re += escapeRegExp(c)
+    }
+  }
+  return re
+}
+
+/**
+ * Compile a glob that is relative to `cwd`. The literal directory part is
+ * canonicalised like a path, so the matcher agrees with canonical claim paths.
+ * A glob that cannot be compiled matches every path.
+ */
+export function compileGlob(
+  pattern: string,
+  cwd: string,
+  realpath: (p: string) => string | null,
+): GlobMatcher {
+  const segments = resolve(cwd, pattern).split("/")
+  const literal: string[] = []
+  let i = 0
+  for (; i < segments.length; i++) {
+    const seg = segments[i] ?? ""
+    if (/[*?[\]{}]/.test(seg)) {
+      let real: string | null = null
+      try {
+        real = realpath([...literal, seg].join("/") || "/")
+      } catch {
+        real = null
+      }
+      if (real === null) break
+    }
+    literal.push(seg)
+  }
+  const prefix = canonicalPath(literal.join("/") || "/", cwd, realpath)
+  const rest = segments.slice(i).join("/")
+  if (rest === "") return { pattern, matches: (p) => p === prefix }
+  const head = prefix.endsWith("/") ? prefix : `${prefix}/`
+  let re: RegExp
+  try {
+    re = new RegExp(`^${escapeRegExp(head)}${globSource(rest)}$`)
+  } catch {
+    return { pattern, matches: () => true }
+  }
+  return { pattern, matches: (p) => re.test(p) }
 }

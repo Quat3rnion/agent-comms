@@ -109,7 +109,7 @@ impl Store {
     /// `StoreError::Conflict` if the nick of a new account is taken.
     pub fn upsert_account(&self, row: &AccountRow) -> StoreResult<()> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         let exists = tx
             .query_row(
                 "SELECT 1 FROM accounts WHERE account = ?1",
@@ -184,7 +184,7 @@ impl Store {
     /// the new nick or an alias of it.
     pub fn set_nick(&self, account: &str, nick: &str, nick_fold: &str) -> StoreResult<bool> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         let old: Option<(String, String)> = tx
             .query_row(
                 "SELECT nick, nick_fold FROM accounts WHERE account = ?1",
@@ -222,7 +222,7 @@ impl Store {
     /// nick of the account. Fails with `Conflict` if another account owns it.
     pub fn add_alias(&self, account: &str, nick: &str, nick_fold: &str) -> StoreResult<()> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         if taken_by_other(&tx, nick_fold, account)? {
             return Err(StoreError::Conflict(format!(
                 "nick {nick} is already taken"
@@ -264,13 +264,19 @@ impl Store {
         Ok(())
     }
 
-    /// Record activity (Unix seconds).
+    /// Queue an activity record (Unix seconds; see [`Store`]).
     pub fn touch(&self, account: &str, now: i64) -> StoreResult<()> {
-        let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE accounts SET last_activity = ?2 WHERE account = ?1",
-            params![account, now],
-        )?;
+        let account = account.to_string();
+        self.conn.defer(
+            "touch",
+            Box::new(move |conn| {
+                conn.execute(
+                    "UPDATE accounts SET last_activity = ?2 WHERE account = ?1",
+                    params![account, now],
+                )?;
+                Ok(())
+            }),
+        );
         Ok(())
     }
 
@@ -280,7 +286,7 @@ impl Store {
     /// account did not exist.
     pub fn retire(&self, account: &str) -> StoreResult<bool> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         tx.execute("DELETE FROM aliases WHERE account = ?1", params![account])?;
         tx.execute(
             "DELETE FROM memberships WHERE account = ?1",
@@ -331,7 +337,7 @@ impl Store {
     /// Replace all memberships of an account. Items are `(channel_fold, channel_name)`.
     pub fn set_memberships(&self, account: &str, channels: &[(String, String)]) -> StoreResult<()> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
+        let tx = conn.savepoint()?;
         tx.execute(
             "DELETE FROM memberships WHERE account = ?1",
             params![account],

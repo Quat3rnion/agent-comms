@@ -72,6 +72,34 @@ impl Outbound {
         }
     }
 
+    /// Queue one line (without CRLF) and wait for queue space (backpressure).
+    /// When the queue has no space for `stall`, the connection is closed with
+    /// `SendQ exceeded`. Returns false when the line was dropped.
+    pub async fn send_line_wait(&self, line: &str, stall: std::time::Duration) -> bool {
+        if self.is_closed() {
+            return false;
+        }
+        tokio::select! {
+            r = self.tx.send(Arc::from(line)) => match r {
+                Ok(()) => true,
+                Err(_) => {
+                    self.close();
+                    false
+                }
+            },
+            _ = self.closed_notified() => false,
+            _ = tokio::time::sleep(stall) => {
+                self.close_with("SendQ exceeded");
+                false
+            }
+        }
+    }
+
+    /// Free space in the queue (lines).
+    pub fn free(&self) -> usize {
+        self.tx.capacity()
+    }
+
     pub fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
         self.close_notify.notify_waiters();
@@ -147,6 +175,12 @@ pub struct SaslState {
     pub mechanism: String,
     /// Base64 chunks received so far.
     pub buffer: String,
+    /// Decoded credentials that the connection task must verify outside the
+    /// world lock. The connection task takes them.
+    pub pending: Option<crate::sasl::PendingPlain>,
+    /// True from the complete payload until the verification result is
+    /// applied. Registration does not complete while this is true.
+    pub verifying: bool,
 }
 
 /// Registration state of a connection.

@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::module::{Cx, Flow, Module};
 use crate::modules::hub::{link_of_account, LinkEntry, LinkExtension, LinkHub};
 use crate::state::{SharedState, World};
-use crate::store::ClaimRow;
+use crate::store::{ClaimRow, Store};
 use crate::user::{Role, UserId};
 use crate::util::{fold, unix_now};
 use agent_comms_proto::numeric::{ERR_NEEDMOREPARAMS, ERR_NOPRIVILEGES};
@@ -237,7 +237,7 @@ impl ClaimsModule {
         }
         let account = msg.params[0].as_str();
         let path = msg.params[1..].join(" ");
-        let Some(holder) = owned_account(world, link, account) else {
+        let Some(holder) = owned_account(world, self.hub.store(), link, account) else {
             reply(fail(
                 "CLAIM",
                 "UNKNOWN_ACCOUNT",
@@ -304,7 +304,7 @@ impl ClaimsModule {
         }
         let account = msg.params[0].as_str();
         let path = msg.params[1..].join(" ");
-        if owned_account(world, link, account).is_none() {
+        if owned_account(world, self.hub.store(), link, account).is_none() {
             reply(fail(
                 "RELEASE",
                 "UNKNOWN_ACCOUNT",
@@ -391,17 +391,34 @@ impl ClaimsModule {
 }
 
 /// The canonical account name and current nick of `account`, when the account
-/// exists and `link` may act for it (owned by this link, or not attached to
-/// any link yet, as during the link burst).
-fn owned_account(world: &World, link: &LinkEntry, account: &str) -> Option<(String, String)> {
+/// exists and `link` owns it durably. With a store, the stored owner link of
+/// the account must be `link` (INTRODUCE sets it, also during the burst).
+/// Without a store, the account must be attached to `link` now. A dormant
+/// account of another link is refused.
+fn owned_account(
+    world: &World,
+    store: Option<&Arc<Store>>,
+    link: &LinkEntry,
+    account: &str,
+) -> Option<(String, String)> {
     let uid = world.find_account(account)?;
-    match link_of_account(world, account) {
-        Some(h) if h.name != link.name => return None,
-        _ => {}
-    }
     let u = world.user(uid)?;
     let canonical = u.account.clone().unwrap_or_else(|| account.to_string());
-    Some((canonical, u.nick.clone()))
+    let attached = link_of_account(world, account).map(|h| h.name);
+    if attached.as_ref().is_some_and(|n| *n != link.name) {
+        return None;
+    }
+    let owned = match store {
+        Some(s) => match s.get_account(&canonical) {
+            Ok(row) => row.is_some_and(|r| r.link.as_deref() == Some(link.name.as_str())),
+            Err(e) => {
+                tracing::warn!("claims: get_account failed for {canonical}: {e}");
+                false
+            }
+        },
+        None => attached.is_some(),
+    };
+    owned.then(|| (canonical, u.nick.clone()))
 }
 
 impl Module for ClaimsModule {

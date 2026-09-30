@@ -268,17 +268,16 @@ pub fn on_stored(
     if accounts.is_empty() {
         return;
     }
-    let seq = match store.message_by_msgid(&ev.msgid) {
-        Ok(Some(m)) => m.seq,
+    let seq = match store.seq_by_msgid(&ev.msgid) {
+        Ok(Some(seq)) => seq,
         Ok(None) => return,
         Err(e) => {
             tracing::warn!(msgid = %ev.msgid, error = %e, "link: cannot find stored message");
             return;
         }
     };
-    for account in accounts {
-        if let Err(e) = store.set_cursor(&account, seq) {
-            tracing::warn!(%account, error = %e, "link: cannot set delivery cursor");
-        }
+    // Deferred, in one statement loop: this runs under the world lock.
+    if let Err(e) = store.set_cursors(&accounts, seq) {
+        tracing::warn!(error = %e, "link: cannot set delivery cursors");
     }
 }

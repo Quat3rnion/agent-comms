@@ -111,6 +111,62 @@ fn resolve_bound(
     }
 }
 
+fn insert_message_conn(
+    conn: &mut Connection,
+    seq: i64,
+    msg: &NewMessage,
+    recipients: &[String],
+) -> StoreResult<()> {
+    let tx = conn.savepoint()?;
+    let lines_text = msg.lines.join("\n");
+    tx.execute(
+        "INSERT INTO messages (seq, msgid, time_ms, sender_account, sender_nick, sender_source, \
+         target, target_fold, is_channel, command, tags, lines, multiline, dm_account) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            seq,
+            msg.msgid,
+            msg.time_ms,
+            msg.sender_account,
+            msg.sender_nick,
+            msg.sender_source,
+            msg.target,
+            fold(&msg.target),
+            msg.is_channel as i64,
+            msg.command,
+            msg.tags,
+            lines_text,
+            (msg.lines.len() > 1) as i64,
+            msg.dm_account,
+        ],
+    )?;
+    {
+        let mut stmt =
+            tx.prepare_cached("INSERT OR IGNORE INTO recipients (seq, account) VALUES (?1, ?2)")?;
+        for account in recipients {
+            stmt.execute(params![seq, account])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+fn stored_form(seq: i64, msg: &NewMessage) -> StoredMessage {
+    StoredMessage {
+        seq,
+        msgid: msg.msgid.clone(),
+        time_ms: msg.time_ms,
+        sender_account: msg.sender_account.clone(),
+        sender_nick: msg.sender_nick.clone(),
+        sender_source: msg.sender_source.clone(),
+        target: msg.target.clone(),
+        is_channel: msg.is_channel,
+        command: msg.command.clone(),
+        tags: msg.tags.clone(),
+        lines: msg.lines.clone(),
+    }
+}
+
 impl Store {
     /// Store a message and the accounts that receive it. Returns the stored
     /// form with its new `seq`. A duplicate `msgid` is an error.
@@ -120,50 +176,28 @@ impl Store {
         recipients: &[String],
     ) -> StoreResult<StoredMessage> {
         let mut conn = self.conn.lock();
-        let tx = conn.transaction()?;
-        let lines_text = msg.lines.join("\n");
-        tx.execute(
-            "INSERT INTO messages (msgid, time_ms, sender_account, sender_nick, sender_source, \
-             target, target_fold, is_channel, command, tags, lines, multiline, dm_account) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-            params![
-                msg.msgid,
-                msg.time_ms,
-                msg.sender_account,
-                msg.sender_nick,
-                msg.sender_source,
-                msg.target,
-                fold(&msg.target),
-                msg.is_channel as i64,
-                msg.command,
-                msg.tags,
-                lines_text,
-                (msg.lines.len() > 1) as i64,
-                msg.dm_account,
-            ],
-        )?;
-        let seq = tx.last_insert_rowid();
-        {
-            let mut stmt =
-                tx.prepare("INSERT OR IGNORE INTO recipients (seq, account) VALUES (?1, ?2)")?;
-            for account in recipients {
-                stmt.execute(params![seq, account])?;
-            }
-        }
-        tx.commit()?;
-        Ok(StoredMessage {
-            seq,
-            msgid: msg.msgid.clone(),
-            time_ms: msg.time_ms,
-            sender_account: msg.sender_account.clone(),
-            sender_nick: msg.sender_nick.clone(),
-            sender_source: msg.sender_source.clone(),
-            target: msg.target.clone(),
-            is_channel: msg.is_channel,
-            command: msg.command.clone(),
-            tags: msg.tags.clone(),
-            lines: msg.lines.clone(),
-        })
+        let mut next = self.next_seq.lock();
+        let seq = *next;
+        insert_message_conn(&mut conn, seq, msg, recipients)?;
+        *next += 1;
+        *self.last_insert.lock() = Some((msg.msgid.clone(), seq));
+        Ok(stored_form(seq, msg))
+    }
+
+    /// Queue a message and the accounts that receive it (see [`Store`]).
+    /// Returns its `seq` at once. An error is only logged.
+    pub fn insert_message_deferred(&self, msg: &NewMessage, recipients: &[String]) -> i64 {
+        // Allocate and queue under one lock, so the queue is in `seq` order.
+        let mut next = self.next_seq.lock();
+        let seq = *next;
+        *next += 1;
+        let (msg, recipients) = (msg.clone(), recipients.to_vec());
+        *self.last_insert.lock() = Some((msg.msgid.clone(), seq));
+        self.conn.defer(
+            "insert_message",
+            Box::new(move |conn| insert_message_conn(conn, seq, &msg, &recipients)),
+        );
+        seq
     }
 
     pub fn message_by_msgid(&self, msgid: &str) -> StoreResult<Option<StoredMessage>> {
@@ -217,6 +251,43 @@ impl Store {
             params![account, seq],
         )?;
         Ok(())
+    }
+
+    /// Queue a forward move of the delivery cursors of `accounts` (see
+    /// [`Store`]). A lower value is ignored.
+    pub fn set_cursors(&self, accounts: &[String], seq: i64) -> StoreResult<()> {
+        let accounts = accounts.to_vec();
+        self.conn.defer(
+            "set_cursors",
+            Box::new(move |conn| {
+                let mut stmt = conn.prepare_cached(
+                    "INSERT INTO cursors (account, seq) VALUES (?1, ?2) \
+                     ON CONFLICT(account) DO UPDATE SET seq = MAX(cursors.seq, excluded.seq)",
+                )?;
+                for account in &accounts {
+                    stmt.execute(params![account, seq])?;
+                }
+                Ok(())
+            }),
+        );
+        Ok(())
+    }
+
+    /// `seq` of the stored message with `msgid`.
+    pub fn seq_by_msgid(&self, msgid: &str) -> StoreResult<Option<i64>> {
+        if let Some((id, seq)) = &*self.last_insert.lock() {
+            if id == msgid {
+                return Ok(Some(*seq));
+            }
+        }
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                "SELECT seq FROM messages WHERE msgid = ?1",
+                params![msgid],
+                |r| r.get(0),
+            )
+            .optional()?)
     }
 
     // ---- CHATHISTORY ----

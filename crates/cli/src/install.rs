@@ -67,10 +67,11 @@ pub fn run(config_dir: &Path, args: &InstallArgs) -> Result<()> {
     };
 
     let mut generated_password = None;
-    if args.force || args.operator_password.is_some() || secrets.operator.is_none() {
-        let (password, generated) = match &args.operator_password {
-            Some(p) if !p.is_empty() => (p.clone(), false),
-            _ => (token::generate_password(), true),
+    let given_password = token::read_password(args.password_stdin, args.prompt)?;
+    if args.force || given_password.is_some() || secrets.operator.is_none() {
+        let (password, generated) = match given_password {
+            Some(p) => (p, false),
+            None => (token::generate_password(), true),
         };
         token::set_operator_password(&mut secrets, &password)?;
         if generated {

@@ -202,6 +202,7 @@ pub fn quit(cx: &mut Cx<'_>, uid: UserId, reason: &str) {
     for module in &state.modules {
         module.on_quit(cx, uid, reason);
     }
+    crate::handlers::message::forget_user(state, uid);
     for key in channels {
         remove_member(cx, uid, &key);
     }

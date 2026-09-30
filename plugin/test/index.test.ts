@@ -253,7 +253,12 @@ afterEach(async () => {
 })
 
 async function boot(
-  o: { options?: Record<string, unknown>; connected?: boolean; sessions?: Record<string, unknown> } = {},
+  o: {
+    options?: Record<string, unknown>
+    connected?: boolean
+    sessions?: Record<string, unknown>
+    realpath?: (p: string) => string | null
+  } = {},
 ) {
   const link = new FakeLink()
   if (o.connected !== false) link.state = "established"
@@ -262,7 +267,7 @@ async function boot(
     link: link as unknown as LinkLike,
     now: () => NOW,
     log: () => {},
-    realpath: () => null,
+    realpath: o.realpath ?? (() => null),
     registerTools: async () => ({ dispose: async () => {} }),
   })
   if (rt === null) throw new Error("runtime is disabled")
@@ -908,6 +913,51 @@ describe("permission hook", () => {
     const b = edit("ses_a", "src/free.ts")
     await open.h.hooks.evaluate[0]?.(b)
     expect(b.effect).toBe("allow")
+  })
+
+  test("denies a literal file name with brackets that another agent claims", async () => {
+    const file = "/work/webapp/src/routes/[id].ts"
+    const b = await withClaims({ realpath: (p) => (p === file ? p : null) })
+    b.link.emit("line", msg("CLAIMSET", ["ses_x", "xnick", "100", "9999999999", file]))
+    const ev = edit("ses_a", "src/routes/[id].ts")
+    await b.h.hooks.evaluate[0]?.(ev)
+    expect(ev.effect).toBe("deny")
+    expect(ev.message).toContain(file)
+  })
+
+  test("denies a glob that matches a claimed path", async () => {
+    const { h } = await withClaims()
+    const ev = edit("ses_a", "src/**/*.ts")
+    await h.hooks.evaluate[0]?.(ev)
+    expect(ev.effect).toBe("deny")
+    expect(ev.message).toContain("/work/webapp/src/a.ts is claimed by xnick")
+  })
+
+  test("allows a glob with no match, and an edit with no paths, while established", async () => {
+    const { h } = await withClaims()
+    const glob = edit("ses_a", "lib/**/*.ts")
+    await h.hooks.evaluate[0]?.(glob)
+    expect(glob.effect).toBe("allow")
+    const empty = { ...edit("ses_a", ""), resources: [] as string[] }
+    await h.hooks.evaluate[0]?.(empty)
+    expect(empty.effect).toBe("allow")
+  })
+
+  test("offline: globs and edits with no paths follow failMode", async () => {
+    const cases = [
+      ["deny", "deny"],
+      ["ask", "ask"],
+      ["open", "allow"],
+    ] as const
+    for (const [failMode, expected] of cases) {
+      const b = await boot({ connected: false, options: { graceMs: 1, failMode } })
+      const glob = edit("ses_a", "lib/**/*.ts")
+      await b.h.hooks.evaluate[0]?.(glob)
+      expect(glob.effect).toBe(expected)
+      const empty = { ...edit("ses_a", ""), resources: [] as string[] }
+      await b.h.hooks.evaluate[0]?.(empty)
+      expect(empty.effect).toBe(expected)
+    }
   })
 })
 
