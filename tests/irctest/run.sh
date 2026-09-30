@@ -67,7 +67,15 @@ K_EXPR=""
 
 # Tests to deselect (pytest node id prefixes, passed as --deselect).
 DESELECT=(
-  # irctest/server_tests/list.py::ListTestCase::test_list_elist_c
+  # OPER is not supported: operator status comes from SASL.
+  "irctest/server_tests/who.py::WhoTestCase::testWhoNickOper"
+  "irctest/server_tests/who.py::WhoTestCase::testWhoNickAwayAndOper"
+  "irctest/server_tests/whois.py::WhoisTestCase::testWhoisNumerics[oper]"
+  # These use multi-prefix / userhost-in-names, which are not supported.
+  "irctest/server_tests/cap.py::CapTestCase::testReqOne"
+  "irctest/server_tests/cap.py::CapTestCase::testReqTwo"
+  "irctest/server_tests/cap.py::CapTestCase::testReqOneThenOne"
+  "irctest/server_tests/cap.py::CapTestCase::testReqPostRegistration"
 )
 
 # ---------------------------------------------------------------------------

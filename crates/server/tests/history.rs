@@ -300,9 +300,22 @@ async fn chathistory_markread_and_restart() {
     let f = guest.fail("CHATHISTORY LATEST #room * 10").await;
     assert_eq!(f.param(0), Some("CHATHISTORY"));
     assert_eq!(f.param(1), Some("ACCOUNT_REQUIRED"));
-    let f = guest.fail("MARKREAD #room").await;
-    assert_eq!(f.param(0), Some("MARKREAD"));
-    assert_eq!(f.param(1), Some("ACCOUNT_REQUIRED"));
+    // A guest has read markers in memory only.
+    guest.send("MARKREAD #room").await;
+    let m = guest.expect(|m| m.command == "MARKREAD").await;
+    assert_eq!(m.params, vec!["#room".to_string(), "*".to_string()]);
+    guest
+        .send(&format!("MARKREAD #room timestamp={}", seen[1].time))
+        .await;
+    let m = guest.expect(|m| m.command == "MARKREAD").await;
+    assert_eq!(
+        m.params,
+        vec!["#room".to_string(), format!("timestamp={}", seen[1].time)]
+    );
+    let f = guest.fail("MARKREAD").await;
+    assert_eq!(f.param(1), Some("NEED_MORE_PARAMS"));
+    let f = guest.fail("MARKREAD #room *").await;
+    assert_eq!(f.param(1), Some("INVALID_PARAMS"));
     let f = op.fail("CHATHISTORY LATEST #elsewhere * 10").await;
     assert_eq!(f.param(1), Some("INVALID_TARGET"));
     assert_eq!(f.param(2), Some("LATEST"));

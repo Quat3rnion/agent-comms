@@ -16,9 +16,30 @@ use tokio::task::JoinHandle;
 
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Modules that `run` registers.
-pub fn default_modules(_config: &Config) -> Vec<Arc<dyn Module>> {
-    vec![]
+/// Modules that `run` registers, in hook order. Opens the SQLite store when a
+/// module needs it.
+pub fn default_modules(config: &Config) -> anyhow::Result<Vec<Arc<dyn Module>>> {
+    use crate::modules::{
+        authority::AuthorityModule, broadcast::BroadcastModule, history::HistoryModule,
+    };
+    use crate::store::Store;
+
+    let m = &config.modules;
+    let mut out: Vec<Arc<dyn Module>> = Vec::new();
+    if m.broadcast {
+        out.push(Arc::new(BroadcastModule));
+    }
+    if m.authority {
+        out.push(Arc::new(AuthorityModule));
+    }
+    if m.history {
+        let store = Arc::new(
+            Store::open(&config.db_path())
+                .with_context(|| format!("open database {}", config.db_path().display()))?,
+        );
+        out.push(Arc::new(HistoryModule::new(store, config)));
+    }
+    Ok(out)
 }
 
 pub struct Running {
@@ -148,7 +169,7 @@ pub async fn run(
     secrets: Secrets,
     shutdown: impl Future<Output = ()> + Send,
 ) -> anyhow::Result<()> {
-    let modules = default_modules(&config);
+    let modules = default_modules(&config)?;
     let running = start_with(config, secrets, modules).await?;
     shutdown.await;
     running.shutdown().await

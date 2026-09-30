@@ -246,7 +246,7 @@ fn user(cx: &mut Cx<'_>, uid: UserId, msg: &Message) {
         );
         return;
     }
-    if msg.params.len() < 4 || msg.params[0].is_empty() {
+    if msg.params.len() < 4 || msg.params[0].is_empty() || msg.params[3].is_empty() {
         need_more(cx, uid, "USER");
         return;
     }

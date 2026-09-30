@@ -3,9 +3,12 @@
 
 use crate::module::Cx;
 use crate::ops;
+use crate::state::ServerState;
 use crate::user::{Role, User, UserId};
 use crate::util::{fold, format_time_ms, now_ms};
 use agent_comms_proto::{numeric, Message};
+use std::collections::HashSet;
+use std::sync::OnceLock;
 
 const RPL_USERHOST: &str = "302";
 const RPL_ISON: &str = "303";
@@ -27,6 +30,66 @@ pub fn handle(cx: &mut Cx<'_>, uid: UserId, msg: &Message) -> bool {
         _ => return false,
     }
     true
+}
+
+/// Users with user mode `+i`, keyed by server instance and user.
+fn invisible_set() -> &'static parking_lot::Mutex<HashSet<(usize, UserId)>> {
+    static INVISIBLE: OnceLock<parking_lot::Mutex<HashSet<(usize, UserId)>>> = OnceLock::new();
+    INVISIBLE.get_or_init(|| parking_lot::Mutex::new(HashSet::new()))
+}
+
+fn server_key(cx: &Cx<'_>) -> usize {
+    cx.state as *const ServerState as usize
+}
+
+/// The invisible users of this server that are still connected. Removes the
+/// entries of users that are gone.
+fn invisible_users(cx: &Cx<'_>) -> HashSet<UserId> {
+    let key = server_key(cx);
+    let mut set = invisible_set().lock();
+    set.retain(|(s, u)| *s != key || cx.world.users.contains_key(u));
+    set.iter()
+        .filter(|(s, _)| *s == key)
+        .map(|(_, u)| *u)
+        .collect()
+}
+
+fn is_invisible(cx: &Cx<'_>, uid: UserId) -> bool {
+    invisible_set().lock().contains(&(server_key(cx), uid))
+}
+
+fn set_invisible(cx: &Cx<'_>, uid: UserId, on: bool) {
+    let k = (server_key(cx), uid);
+    let mut set = invisible_set().lock();
+    if on {
+        set.insert(k);
+    } else {
+        set.remove(&k);
+    }
+}
+
+/// Case-insensitive glob match with `*` and `?`.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = fold(pattern).chars().collect();
+    let t: Vec<char> = fold(text).chars().collect();
+    let (mut pi, mut ti) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ti));
+            pi += 1;
+        } else if let Some((sp, st)) = star {
+            pi = sp + 1;
+            ti = st + 1;
+            star = Some((sp, st + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
 }
 
 fn need_more(cx: &mut Cx<'_>, uid: UserId, cmd: &str) {
@@ -67,18 +130,54 @@ fn who(cx: &mut Cx<'_>, uid: UserId, msg: &Message) {
         .to_string();
     let server = cx.server_name().to_string();
     let mut rows = Vec::new();
-    if mask.starts_with('#') {
+    if mask.starts_with('#') || mask.starts_with('&') {
         if let Some(c) = cx.world.channels.get(&fold(&mask)) {
-            if !c.modes.secret || c.is_member(uid) {
+            let member = c.is_member(uid);
+            if !c.modes.secret || member {
+                let invisible = invisible_users(cx);
                 for (m, modes) in &c.members {
+                    if !member && invisible.contains(m) {
+                        continue;
+                    }
                     if let Some(u) = cx.world.user(*m) {
                         rows.push(who_line(&server, &c.name, u, modes.prefix()));
                     }
                 }
             }
         }
-    } else if let Some(u) = cx.world.find_nick(&mask).and_then(|t| cx.world.user(t)) {
-        rows.push(who_line(&server, "*", u, ""));
+    } else if !mask.contains(['*', '?']) && mask != "0" {
+        // A plain nickname ignores user mode +i.
+        if let Some(u) = cx.world.find_nick(&mask).and_then(|t| cx.world.user(t)) {
+            rows.push(who_line(&server, "*", u, ""));
+        }
+    } else {
+        let pattern = if mask == "0" { "*" } else { mask.as_str() };
+        let invisible = invisible_users(cx);
+        let mine: HashSet<&String> = cx
+            .world
+            .user(uid)
+            .map(|u| u.channels.iter().collect())
+            .unwrap_or_default();
+        let mut users: Vec<&User> = cx
+            .world
+            .users
+            .values()
+            .filter(|u| u.registered)
+            .filter(|u| {
+                u.id == uid
+                    || !invisible.contains(&u.id)
+                    || u.channels.iter().any(|c| mine.contains(c))
+            })
+            .filter(|u| {
+                [&u.nick, &u.username, &u.host, &u.realname, &server]
+                    .iter()
+                    .any(|f| glob_match(pattern, f))
+            })
+            .collect();
+        users.sort_by_key(|u| u.id);
+        for u in users {
+            rows.push(who_line(&server, "*", u, ""));
+        }
     }
     for row in rows {
         cx.numeric(uid, numeric::RPL_WHOREPLY, row);
@@ -228,10 +327,35 @@ fn user_mode(cx: &mut Cx<'_>, uid: UserId, msg: &Message) -> bool {
     }
     match msg.param(1) {
         None => {
-            cx.numeric(uid, numeric::RPL_UMODEIS, vec!["+i".into()]);
+            let modes = if is_invisible(cx, uid) { "+i" } else { "+" };
+            cx.numeric(uid, numeric::RPL_UMODEIS, vec![modes.into()]);
         }
         Some(modes) => {
-            if modes.chars().any(|c| !matches!(c, '+' | '-' | 'i')) {
+            let before = is_invisible(cx, uid);
+            let mut on = true;
+            let mut after = before;
+            let mut unknown = false;
+            for c in modes.chars() {
+                match c {
+                    '+' => on = true,
+                    '-' => on = false,
+                    'i' => after = on,
+                    _ => unknown = true,
+                }
+            }
+            if after != before {
+                set_invisible(cx, uid, after);
+                if let Some(u) = cx.world.user(uid) {
+                    let nick = u.nick.clone();
+                    let change = Message::new(
+                        "MODE",
+                        vec![nick, if after { "+i" } else { "-i" }.to_string()],
+                    )
+                    .with_source(u.source());
+                    cx.send(uid, change);
+                }
+            }
+            if unknown {
                 cx.numeric(
                     uid,
                     numeric::ERR_UMODEUNKNOWNFLAG,
@@ -309,12 +433,20 @@ fn motd(cx: &mut Cx<'_>, uid: UserId) {
 }
 
 fn lusers(cx: &mut Cx<'_>, uid: UserId) {
-    let users = cx.world.users.values().filter(|u| u.registered).count();
+    let invisible_ids = invisible_users(cx);
+    let (mut visible, mut invisible) = (0, 0);
+    for u in cx.world.users.values().filter(|u| u.registered) {
+        if invisible_ids.contains(&u.id) {
+            invisible += 1;
+        } else {
+            visible += 1;
+        }
+    }
     cx.numeric(
         uid,
         numeric::RPL_LUSERCLIENT,
         vec![format!(
-            "There are {users} users and 0 invisible on 1 servers"
+            "There are {visible} users and {invisible} invisible on 1 servers"
         )],
     );
 }

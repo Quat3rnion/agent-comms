@@ -11,6 +11,7 @@ use crate::user::{Sink, UserId};
 use crate::util;
 use agent_comms_proto::{escape_tag_value, Message};
 use parking_lot::Mutex;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -21,6 +22,9 @@ pub struct HistoryModule {
     store: Arc<Store>,
     retention_days: u32,
     last_purge: Mutex<Option<Instant>>,
+    /// Read markers of users without an account, in memory only. Keyed by
+    /// the pseudo account key `guest:<uid>`, then by folded target.
+    guest_markers: Mutex<HashMap<String, HashMap<String, i64>>>,
 }
 
 impl HistoryModule {
@@ -29,6 +33,57 @@ impl HistoryModule {
             store,
             retention_days: config.limits.history_retention_days,
             last_purge: Mutex::new(None),
+            guest_markers: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+/// Read marker owner: an account (stored in SQLite) or a per-connection
+/// pseudo account key `guest:<uid>` (stored in memory).
+enum MarkerKey {
+    Account(String),
+    Guest(String),
+}
+
+fn guest_key(uid: UserId) -> String {
+    format!("guest:{}", uid.0)
+}
+
+impl HistoryModule {
+    fn marker_key(cx: &Cx<'_>, uid: UserId) -> Option<MarkerKey> {
+        let u = cx.world.user(uid)?;
+        Some(match &u.account {
+            Some(a) => MarkerKey::Account(a.clone()),
+            None => MarkerKey::Guest(guest_key(uid)),
+        })
+    }
+
+    fn get_marker(&self, key: &MarkerKey, tf: &str) -> StoreResult<Option<i64>> {
+        match key {
+            MarkerKey::Account(a) => self.store.get_marker(a, tf),
+            MarkerKey::Guest(g) => Ok(self
+                .guest_markers
+                .lock()
+                .get(g)
+                .and_then(|m| m.get(tf))
+                .copied()),
+        }
+    }
+
+    /// Set the marker if `ts` is newer. Returns the stored value.
+    fn set_marker(&self, key: &MarkerKey, tf: &str, target: &str, ts: i64) -> StoreResult<i64> {
+        match key {
+            MarkerKey::Account(a) => self.store.set_marker(a, tf, target, ts),
+            MarkerKey::Guest(g) => {
+                let mut all = self.guest_markers.lock();
+                let v = all
+                    .entry(g.clone())
+                    .or_default()
+                    .entry(tf.to_string())
+                    .or_insert(ts);
+                *v = (*v).max(ts);
+                Ok(*v)
+            }
         }
     }
 }
@@ -483,7 +538,7 @@ impl HistoryModule {
         );
     }
 
-    fn markread(&self, cx: &mut Cx<'_>, uid: UserId, account: &str, msg: &Message) {
+    fn markread(&self, cx: &mut Cx<'_>, uid: UserId, key: &MarkerKey, msg: &Message) {
         let Some(target) = msg.param(0).filter(|t| !t.is_empty() && *t != "*") else {
             fail(
                 cx,
@@ -501,7 +556,7 @@ impl HistoryModule {
         let server = cx.server_name().to_string();
 
         let Some(value) = msg.param(1) else {
-            match self.store.get_marker(account, &tf) {
+            match self.get_marker(key, &tf) {
                 Ok(v) => cx.send(uid, markread_line(&server, &target, v)),
                 Err(e) => {
                     tracing::warn!("read marker lookup failed: {e}");
@@ -533,7 +588,7 @@ impl HistoryModule {
             );
             return;
         };
-        let stored = match self.store.set_marker(account, &tf, &target, ts) {
+        let stored = match self.set_marker(key, &tf, &target, ts) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!("read marker update failed: {e}");
@@ -552,6 +607,9 @@ impl HistoryModule {
         };
         let line = markread_line(&server, &target, Some(stored));
         cx.send(uid, line.clone());
+        let MarkerKey::Account(account) = key else {
+            return;
+        };
         let others: Vec<UserId> = cx
             .world
             .users
@@ -612,6 +670,12 @@ impl Module for HistoryModule {
         if !u.registered {
             return Flow::Continue;
         }
+        if cmd == "MARKREAD" {
+            if let Some(key) = Self::marker_key(cx, uid) {
+                self.markread(cx, uid, &key, msg);
+            }
+            return Flow::Handled;
+        }
         let Some(account) = u.account.clone() else {
             fail(
                 cx,
@@ -624,11 +688,7 @@ impl Module for HistoryModule {
             );
             return Flow::Handled;
         };
-        if cmd == "CHATHISTORY" {
-            self.chathistory(cx, uid, &account, msg);
-        } else {
-            self.markread(cx, uid, &account, msg);
-        }
+        self.chathistory(cx, uid, &account, msg);
         Flow::Handled
     }
 
@@ -697,21 +757,27 @@ impl Module for HistoryModule {
     }
 
     fn on_join(&self, cx: &mut Cx<'_>, uid: UserId, channel: &str) {
-        let Some(account) = cx
+        if !cx
             .world
             .user(uid)
-            .filter(|u| u.has_cap("draft/read-marker"))
-            .and_then(|u| u.account.clone())
-        else {
+            .is_some_and(|u| u.has_cap("draft/read-marker"))
+        {
+            return;
+        }
+        let Some(key) = Self::marker_key(cx, uid) else {
             return;
         };
-        match self.store.get_marker(&account, &store::fold(channel)) {
+        match self.get_marker(&key, &store::fold(channel)) {
             Ok(v) => {
                 let line = markread_line(cx.server_name(), channel, v);
                 cx.send(uid, line);
             }
             Err(e) => tracing::warn!("read marker lookup failed: {e}"),
         }
+    }
+
+    fn on_quit(&self, _cx: &mut Cx<'_>, uid: UserId, _reason: &str) {
+        self.guest_markers.lock().remove(&guest_key(uid));
     }
 
     fn on_tick(&self, _state: &SharedState, now: SystemTime) {

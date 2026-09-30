@@ -43,10 +43,24 @@ pub fn join(cx: &mut Cx<'_>, uid: UserId, chan: &str, notify_self: bool) -> bool
         u.channels.insert(key.clone());
     }
 
-    let m = Message::new("JOIN", vec![display.clone()]).with_source(source);
+    let m = Message::new("JOIN", vec![display.clone()]).with_source(source.clone());
     for member in cx.world.channel_members(&key) {
         if member != uid || notify_self {
             cx.send(member, m.clone());
+        }
+    }
+    let away = cx.world.user(uid).and_then(|u| u.away.clone());
+    if let Some(reason) = away {
+        let a = Message::new("AWAY", vec![reason]).with_source(source);
+        for member in cx.world.channel_members(&key) {
+            if member != uid
+                && cx
+                    .world
+                    .user(member)
+                    .is_some_and(|p| p.has_cap("away-notify"))
+            {
+                cx.send(member, a.clone());
+            }
         }
     }
     let state = cx.state;
@@ -206,6 +220,15 @@ pub fn quit(cx: &mut Cx<'_>, uid: UserId, reason: &str) {
     }
 }
 
+/// Send `m` to `r`. When `direct` is set, skip the label buffer.
+fn send(cx: &mut Cx<'_>, r: UserId, direct: bool, m: Message) {
+    if direct {
+        cx.world.send_to(r, &m);
+    } else {
+        cx.send(r, m);
+    }
+}
+
 /// Deliver a PRIVMSG, NOTICE, or TAGMSG event to its recipients.
 pub fn fanout(cx: &mut Cx<'_>, mut ev: MessageEvent) {
     let state = cx.state;
@@ -232,27 +255,42 @@ pub fn fanout(cx: &mut Cx<'_>, mut ev: MessageEvent) {
         .world
         .user(ev.sender)
         .is_some_and(|u| u.has_cap("echo-message"));
-    let mut set: BTreeSet<UserId> = match &ev.target {
+    // Each delivery is a recipient and a flag. When the flag is set, the
+    // message goes to the socket directly, not into the label buffer: a
+    // labeled message to self with echo-message gives one labeled echo and
+    // one unlabeled delivery.
+    let mut deliveries: Vec<(UserId, bool)> = match &ev.target {
         MsgTarget::Channel(name) => cx
             .world
             .channel_members(&fold(name))
             .into_iter()
             .filter(|m| *m != ev.sender)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|m| (m, false))
             .collect(),
-        MsgTarget::User(u) => [*u].into_iter().collect(),
+        MsgTarget::User(u) => vec![(*u, echo && *u == ev.sender)],
     };
     if echo {
-        set.insert(ev.sender);
+        deliveries.push((ev.sender, false));
     }
-    let recipients: Vec<UserId> = set.into_iter().collect();
+    if ev.command == "TAGMSG" {
+        deliveries.retain(|(r, _)| cx.world.user(*r).is_some_and(|u| u.has_cap("message-tags")));
+    }
+    let recipients: Vec<UserId> = deliveries
+        .iter()
+        .map(|(r, _)| *r)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
 
-    for &r in &recipients {
+    for &(r, direct) in &deliveries {
         let mut out = ev.msg.clone();
         for module in &state.modules {
             module.on_deliver(cx, &ev, r, &mut out);
         }
         if ev.lines.is_empty() {
-            cx.send(r, out);
+            send(cx, r, direct, out);
             continue;
         }
         let multiline = cx
@@ -271,27 +309,33 @@ pub fn fanout(cx: &mut Cx<'_>, mut ev: MessageEvent) {
                     ev.target_name.clone(),
                 ],
             };
-            cx.send(r, open);
+            send(cx, r, direct, open);
             for line in &ev.lines {
                 let mut m = line.clone();
                 if m.source.is_none() {
                     m.source = out.source.clone();
                 }
                 m.set_tag("batch", Some(id.clone()));
-                cx.send(r, m);
+                send(cx, r, direct, m);
             }
             let close = Message::new("BATCH", vec![format!("-{id}")])
                 .with_source(cx.state.config.server_name.clone());
-            cx.send(r, close);
+            send(cx, r, direct, close);
         } else {
-            for (i, line) in ev.lines.iter().enumerate() {
+            // Clients without multiline get each line that has text; only
+            // the first line carries the msgid.
+            let texts = ev
+                .lines
+                .iter()
+                .filter(|l| l.param(1).is_some_and(|t| !t.is_empty()));
+            for (i, line) in texts.enumerate() {
                 let mut m = line.clone();
                 m.source = out.source.clone().or(m.source);
                 m.tags = out.tags.clone();
                 if i > 0 {
                     m.remove_tag("msgid");
                 }
-                cx.send(r, m);
+                send(cx, r, direct, m);
             }
         }
     }
@@ -329,43 +373,79 @@ pub fn dispatch_as(state: &SharedState, uid: UserId, msg: Message) {
             handlers::dispatch(cx, uid, &msg);
         }
 
-        if !labeled {
-            return;
-        }
-        let Some(u) = cx.world.user_mut(uid) else {
-            return;
-        };
-        let buf = u.label_buf.take().unwrap_or_default();
-        u.label = None;
-        let label = label.unwrap_or_default();
-        let server = cx.state.config.server_name.clone();
-        match buf.len() {
-            0 => {
-                let ack = Message::new("ACK", vec![])
-                    .with_source(server)
-                    .with_tag("label", Some(label));
-                cx.world.send_to(uid, &ack);
-            }
-            1 => {
-                let mut m = buf.into_iter().next().expect("one line");
-                m.set_tag("label", Some(label));
-                cx.world.send_to(uid, &m);
-            }
-            _ => {
-                let id = cx.world.batch_id();
-                let open = Message::new("BATCH", vec![format!("+{id}"), "labeled-response".into()])
-                    .with_source(server.clone())
-                    .with_tag("label", Some(label));
-                cx.world.send_to(uid, &open);
-                for mut m in buf {
-                    if !m.has_tag("batch") {
-                        m.set_tag("batch", Some(id.clone()));
-                    }
-                    cx.world.send_to(uid, &m);
-                }
-                let close = Message::new("BATCH", vec![format!("-{id}")]).with_source(server);
-                cx.world.send_to(uid, &close);
-            }
+        if labeled {
+            flush_label(cx, uid, label.unwrap_or_default());
         }
     });
+}
+
+/// End a labeled command: send the label buffer of the user with `label`.
+/// Does nothing when a handler moved the label to a later command.
+pub fn flush_label(cx: &mut Cx<'_>, uid: UserId, label: String) {
+    let Some(u) = cx.world.user_mut(uid) else {
+        return;
+    };
+    let Some(buf) = u.label_buf.take() else {
+        return;
+    };
+    u.label = None;
+    let server = cx.state.config.server_name.clone();
+    match buf.len() {
+        0 => {
+            let ack = Message::new("ACK", vec![])
+                .with_source(server)
+                .with_tag("label", Some(label));
+            cx.world.send_to(uid, &ack);
+        }
+        1 => {
+            let mut m = buf.into_iter().next().expect("one line");
+            m.set_tag("label", Some(label));
+            cx.world.send_to(uid, &m);
+        }
+        _ if is_one_batch(&buf) => {
+            for (i, mut m) in buf.into_iter().enumerate() {
+                if i == 0 {
+                    m.set_tag("label", Some(label.clone()));
+                }
+                cx.world.send_to(uid, &m);
+            }
+        }
+        _ => {
+            let id = cx.world.batch_id();
+            let open = Message::new("BATCH", vec![format!("+{id}"), "labeled-response".into()])
+                .with_source(server.clone())
+                .with_tag("label", Some(label));
+            cx.world.send_to(uid, &open);
+            for mut m in buf {
+                if !m.has_tag("batch") {
+                    m.set_tag("batch", Some(id.clone()));
+                }
+                cx.world.send_to(uid, &m);
+            }
+            let close = Message::new("BATCH", vec![format!("-{id}")]).with_source(server);
+            cx.world.send_to(uid, &close);
+        }
+    }
+}
+
+/// True when `buf` is exactly one batch: an opening BATCH, lines in that
+/// batch, and the closing BATCH.
+fn is_one_batch(buf: &[Message]) -> bool {
+    let (Some(first), Some(last)) = (buf.first(), buf.last()) else {
+        return false;
+    };
+    let Some(id) = first
+        .param(0)
+        .filter(|_| first.command == "BATCH")
+        .and_then(|p| p.strip_prefix('+'))
+    else {
+        return false;
+    };
+    let closes =
+        last.command == "BATCH" && last.param(0).and_then(|p| p.strip_prefix('-')) == Some(id);
+    closes
+        && buf.len() >= 2
+        && buf[1..buf.len() - 1]
+            .iter()
+            .all(|m| m.tag("batch") == Some(id))
 }

@@ -22,6 +22,10 @@ pub type BoxWriter = Box<dyn AsyncWrite + Send + Unpin>;
 /// Maximum size of one client line: body plus tags.
 pub const CLIENT_LINE_MAX: usize = Limits::CLIENT.body + Limits::CLIENT.tags;
 
+/// Maximum size of the tag data that a client can send, without the leading
+/// `@` and the trailing space (IRCv3 message-tags).
+const CLIENT_TAG_DATA_MAX: usize = 4094;
+
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
 const FLOOD_WINDOW: Duration = Duration::from_secs(60);
 const FLOOD_MAX_WAIT: Duration = Duration::from_secs(10);
@@ -296,12 +300,23 @@ async fn session(
         last_rx = Instant::now();
         pinged = false;
 
+        if client_tags_too_long(&line) {
+            input_too_long(state, uid);
+            continue;
+        }
+
         let msg = match Message::parse(&line) {
             Ok(m) => m,
             Err(ParseError::BodyTooLong | ParseError::TagsTooLong) => {
                 input_too_long(state, uid);
                 continue;
             }
+            // Parse the rest of the line so that the unknown command gets
+            // ERR_UNKNOWNCOMMAND (with its label) from the dispatcher.
+            Err(ParseError::InvalidCommand) => match parse_unknown_command(&line) {
+                Some(m) => m,
+                None => continue,
+            },
             Err(_) => continue,
         };
 
@@ -332,6 +347,39 @@ async fn session(
 
         ops::dispatch_as(state, uid, msg);
     }
+}
+
+/// True when the tag data of a client line (without the leading `@` and the
+/// trailing space) is larger than the IRCv3 client limit.
+fn client_tags_too_long(line: &str) -> bool {
+    match line.strip_prefix('@') {
+        Some(rest) => rest.find(' ').unwrap_or(rest.len()) > CLIENT_TAG_DATA_MAX,
+        None => false,
+    }
+}
+
+/// Parse a line whose command token is not valid. The command token is
+/// replaced by a placeholder for the parse and restored after it.
+fn parse_unknown_command(line: &str) -> Option<Message> {
+    let mut start = 0;
+    let mut rest = line;
+    for prefix in ['@', ':'] {
+        if rest.starts_with(prefix) {
+            let end = rest.find(' ')?;
+            let after = rest[end..].trim_start_matches(' ');
+            start += rest.len() - after.len();
+            rest = after;
+        }
+    }
+    let end = rest.find(' ').unwrap_or(rest.len());
+    let command = &rest[..end];
+    if command.is_empty() {
+        return None;
+    }
+    let patched = format!("{}X{}", &line[..start], &rest[end..]);
+    let mut msg = Message::parse(&patched).ok()?;
+    msg.command = command.to_string();
+    Some(msg)
 }
 
 fn input_too_long(state: &SharedState, uid: UserId) {

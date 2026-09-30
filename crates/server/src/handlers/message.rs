@@ -22,6 +22,8 @@ struct PendingBatch {
     target: String,
     command: Option<String>,
     tags: Tags,
+    /// Label of the opening BATCH; the response to the batch carries it.
+    label: Option<String>,
     /// Text and concat flag of each line.
     lines: Vec<(String, bool)>,
     count: usize,
@@ -71,6 +73,19 @@ fn client_tags(msg: &Message) -> Tags {
         })
         .cloned()
         .collect()
+}
+
+/// Client-only tags of `msg`, kept only when the sender has `message-tags`.
+fn sender_tags(cx: &Cx<'_>, uid: UserId, msg: &Message) -> Tags {
+    if cx
+        .world
+        .user(uid)
+        .is_some_and(|u| u.has_cap("message-tags"))
+    {
+        client_tags(msg)
+    } else {
+        Vec::new()
+    }
 }
 
 fn fail(cx: &mut Cx<'_>, uid: UserId, params: Vec<String>) {
@@ -231,7 +246,7 @@ fn send_message(cx: &mut Cx<'_>, uid: UserId, cmd: &str, msg: &Message) {
         return;
     }
 
-    let tags = client_tags(msg);
+    let tags = sender_tags(cx, uid, msg);
     for target in targets
         .split(',')
         .filter(|t| !t.is_empty())
@@ -291,6 +306,21 @@ fn open_batch(cx: &mut Cx<'_>, uid: UserId, reference: &str, msg: &Message) {
         );
         return;
     };
+    // The response to a labeled BATCH comes when the batch closes, so the
+    // opening command itself gets no ACK.
+    let label = msg.tag("label").filter(|l| !l.is_empty()).and_then(|l| {
+        let u = cx.world.user_mut(uid)?;
+        if !u.has_cap("labeled-response") || u.label.as_deref() != Some(l) {
+            return None;
+        }
+        if u.label_buf.as_ref().is_some_and(|b| !b.is_empty()) {
+            return None;
+        }
+        u.label = None;
+        u.label_buf = None;
+        Some(l.to_string())
+    });
+    let tags = sender_tags(cx, uid, msg);
     let k = key(cx, uid);
     pending().lock().insert(
         k,
@@ -298,7 +328,8 @@ fn open_batch(cx: &mut Cx<'_>, uid: UserId, reference: &str, msg: &Message) {
             reference: reference.to_string(),
             target: target.to_string(),
             command: None,
-            tags: Vec::new(),
+            tags,
+            label,
             lines: Vec::new(),
             count: 0,
             bytes: 0,
@@ -329,9 +360,26 @@ fn collect_line(cx: &mut Cx<'_>, uid: UserId, cmd: &str, msg: &Message) {
     }
     let text = msg.param(1).unwrap_or("");
     let concat = msg.has_tag(CONCAT_TAG);
+    if concat && text.is_empty() {
+        p.invalid = true;
+        return;
+    }
     if p.command.is_none() {
         p.command = Some(cmd.to_string());
-        p.tags = client_tags(msg);
+        let extra = if cx
+            .world
+            .user(uid)
+            .is_some_and(|u| u.has_cap("message-tags"))
+        {
+            client_tags(msg)
+        } else {
+            Vec::new()
+        };
+        for (k, v) in extra {
+            if !p.tags.iter().any(|(t, _)| *t == k) {
+                p.tags.push((k, v));
+            }
+        }
     }
     if p.count > 0 && !concat {
         p.bytes += 1;
@@ -362,6 +410,25 @@ fn close_batch(cx: &mut Cx<'_>, uid: UserId, reference: &str) {
         );
         return;
     };
+    // Collect the response under the label of the opening BATCH.
+    let label = p.label.clone().filter(|_| {
+        cx.world
+            .user(uid)
+            .is_some_and(|u| u.label_buf.is_none() && u.has_cap("labeled-response"))
+    });
+    if let Some(l) = &label {
+        if let Some(u) = cx.world.user_mut(uid) {
+            u.label = Some(l.clone());
+            u.label_buf = Some(Vec::new());
+        }
+    }
+    finish_batch(cx, uid, p);
+    if let Some(l) = label {
+        crate::ops::flush_label(cx, uid, l);
+    }
+}
+
+fn finish_batch(cx: &mut Cx<'_>, uid: UserId, p: PendingBatch) {
     let max = cx.config().limits.max_message_bytes;
     let cmd = match (&p.command, p.invalid) {
         (Some(c), false) => c.clone(),
@@ -398,11 +465,28 @@ fn close_batch(cx: &mut Cx<'_>, uid: UserId, reference: &str) {
         );
         return;
     }
+    if p.lines.iter().all(|(t, _)| t.is_empty()) {
+        fail(
+            cx,
+            uid,
+            vec![
+                "MULTILINE_INVALID".into(),
+                "Multiline batch has no text".into(),
+            ],
+        );
+        return;
+    }
 
     let Some((target, display)) = resolve(cx, uid, &cmd, &p.target) else {
         return;
     };
-    let first = p.lines.first().map(|(t, _)| t.clone()).unwrap_or_default();
+    let first = p
+        .lines
+        .iter()
+        .map(|(t, _)| t)
+        .find(|t| !t.is_empty())
+        .cloned()
+        .unwrap_or_default();
     let lines: Vec<Message> = if p.lines.len() > 1 {
         p.lines
             .iter()
