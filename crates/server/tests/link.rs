@@ -867,3 +867,29 @@ async fn challenge_malformed_nonce() {
     l.send("CHALLENGE").await;
     expect_error(&mut l, "malformed CHALLENGE").await;
 }
+
+// LIST through SEND returns the channels (lobby, project and family).
+#[tokio::test]
+async fn list_via_send() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let mut a = link_a(srv.local_addr).await;
+    a.send("SEND ses_A :LIST").await;
+    let mut seen = Vec::new();
+    loop {
+        let m = a.expect(|m| is_deliver_for(m, "ses_A")).await;
+        let i = inner(&m);
+        if i.command == "322" {
+            seen.push(i.param(1).unwrap_or_default().to_string());
+        }
+        if i.command == "323" {
+            break;
+        }
+    }
+    for want in ["#lobby", "#webapp", "#fix-auth"] {
+        assert!(
+            seen.iter().any(|c| c == want),
+            "{want} missing from LIST: {seen:?}"
+        );
+    }
+}

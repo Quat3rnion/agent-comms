@@ -78,7 +78,7 @@ export function buildContext(input: ContextInput): string {
   }
   if (offline) parts.push(offlineText(input.failMode))
   parts.push(
-    "Tools: irc_send (announce/reply; no acknowledgement-only messages), irc_ask (blocking question), irc_wait, irc_read, irc_join, irc_part, irc_names, irc_release.",
+    "Tools: irc_send (announce/reply; no acknowledgement-only messages), irc_ask (blocking question), irc_wait, irc_read, irc_join, irc_part, irc_names, irc_list, irc_release.",
   )
 
   return cap(parts.join(" ")) + (input.joinContext ? `\n${input.joinContext}` : "")

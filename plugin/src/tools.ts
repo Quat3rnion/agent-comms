@@ -1,5 +1,5 @@
 /**
- * Agent-facing IRC tools: send, ask, wait, read, join, part, names, release.
+ * Agent-facing IRC tools: send, ask, wait, read, join, part, names, list, release.
  * `buildTools` is pure. `registerTools` adapts the tools to the opencode plugin API.
  */
 import { resolve } from "node:path"
@@ -45,6 +45,8 @@ const NAMESPACE = "irc"
 const MAX_TIMEOUT_SEC = 3600
 const DEFAULT_READ_LIMIT = 20
 const MAX_READ_LIMIT = 100
+/** At most this many channels get a WHO query for awake counts in irc_list. */
+const LIST_WHO_LIMIT = 30
 
 const OFF = "IRC is off for this session (use /irc on)."
 const UNREACHABLE = "Error: IRC server unreachable."
@@ -576,6 +578,68 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
   )
 
+  // ---- list
+
+  const list = define(
+    "list",
+    "List channels on the IRC server: #lobby, project channels (#<project>), family channels (#<parent-nick>) and ad-hoc channels, with member counts and topics. A channel is active when at least one member is awake (not AWAY).",
+    schema(
+      {
+        activeOnly: { type: "boolean", description: "Show only channels with at least one awake member. Default false." },
+      },
+      [],
+    ),
+    false,
+    async (a, _ctx, rec) => {
+      const activeOnly = typeof a === "object" && a !== null && (a as Record<string, unknown>)["activeOnly"] === true
+      requireLink()
+      const lines = await queryChecked(rec, msg("LIST", []))
+      const channels: Array<{ name: string; members: number; topic: string }> = []
+      for (const l of lines) {
+        if (l.command !== "322") continue
+        const name = l.params[1]
+        if (name === undefined) continue
+        channels.push({ name, members: Number(l.params[2] ?? "0") || 0, topic: l.params[3] ?? "" })
+      }
+      if (channels.length === 0) return "No channels."
+
+      const rows: Array<{ name: string; kind: string; members: number; awake: number | null; topic: string }> = []
+      for (const c of channels.slice(0, LIST_WHO_LIMIT)) {
+        let awake: number | null = null
+        let family = false
+        try {
+          const who = await link.query(rec.account, msg("WHO", [c.name]))
+          const nicks = new Set<string>()
+          awake = 0
+          for (const w of who) {
+            if (w.command !== "352") continue
+            const nick = w.params[5] ?? ""
+            nicks.add(nick.toLowerCase())
+            if ((w.params[6] ?? "").startsWith("H")) awake++
+          }
+          family = nicks.has(c.name.slice(1).toLowerCase())
+        } catch {
+          // Awake counts are optional.
+        }
+        const kind = c.name.toLowerCase() === "#lobby" ? "lobby" : family ? "family" : "project/ad-hoc"
+        rows.push({ name: c.name, kind, members: c.members, awake, topic: c.topic })
+      }
+      for (const c of channels.slice(LIST_WHO_LIMIT)) {
+        rows.push({ name: c.name, kind: "?", members: c.members, awake: null, topic: c.topic })
+      }
+
+      const shown = activeOnly ? rows.filter((r) => r.awake !== null && r.awake > 0) : rows
+      if (shown.length === 0) return "No active channels (no channel has an awake member)."
+      shown.sort((x, y) => (y.awake ?? -1) - (x.awake ?? -1) || y.members - x.members || x.name.localeCompare(y.name))
+      const out = shown.map((r) => {
+        const awake = r.awake === null ? "" : `, ${r.awake} awake`
+        const topic = r.topic !== "" ? ` — ${r.topic.slice(0, options.previewChars)}` : ""
+        return `${r.name} [${r.kind}] ${r.members} member(s)${awake}${topic}`
+      })
+      return `Channels (${shown.length}${activeOnly ? " active" : ""}):\n${out.join("\n")}\nUse irc_join to join a channel, irc_names to see its members.`
+    },
+  )
+
   // ---- release
 
   const release = define(
@@ -613,7 +677,7 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     },
   )
 
-  return [send, ask, wait, read, join, part, names, release]
+  return [send, ask, wait, read, join, part, names, list, release]
 }
 
 // ---------------------------------------------------------------------------

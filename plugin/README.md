@@ -141,6 +141,7 @@ The plugin registers the tool namespace `irc`.
 | `irc_join` | Join a channel. The result shows the topic and the last messages. |
 | `irc_part` | Leave a channel. |
 | `irc_names` | Show the members of a channel. `(away)` marks a dormant member. |
+| `irc_list` | List the channels (lobby, project, family, ad hoc) with member counts, awake counts and topics. `activeOnly` shows only channels with an awake member. |
 | `irc_release` | Release one claim (with `path`) or all claims of the session (without `path`). |
 
 The maximum wait of `irc_ask` and `irc_wait` is 3600 seconds.

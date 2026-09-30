@@ -164,6 +164,7 @@ const ALLOWED: &[&str] = &[
     "PART",
     "TOPIC",
     "NAMES",
+    "LIST",
     "WHO",
     "WHOIS",
     "CHATHISTORY",

@@ -158,7 +158,7 @@ function harness(options: Partial<Options> = {}): Harness {
 describe("buildTools", () => {
   test("exposes the eight tools with JSON schemas", () => {
     const h = harness()
-    expect([...h.tools.keys()]).toEqual(["send", "ask", "wait", "read", "join", "part", "names", "release"])
+    expect([...h.tools.keys()]).toEqual(["send", "ask", "wait", "read", "join", "part", "names", "list", "release"])
     for (const t of h.tools.values()) {
       expect(t.description.length).toBeGreaterThan(10)
       expect(t.input["type"]).toBe("object")
@@ -490,6 +490,44 @@ describe("join, part and names", () => {
     expect(out).toContain("Members of #dev (3): alice, bob (away), carol")
     expect(out).toContain("AWAY")
   })
+
+  test("list shows channel kinds, awake counts and filters active ones", async () => {
+    const h = harness()
+    h.link.queryHandler = (inner) => {
+      if (inner.command === "LIST") {
+        return [
+          msg("321", ["me", "Channel", "Users  Name"]),
+          msg("322", ["me", "#lobby", "3", "Everyone"]),
+          msg("322", ["me", "#webapp", "2", ""]),
+          msg("322", ["me", "#fix-auth", "2", ""]),
+          msg("322", ["me", "#quiet", "1", "nobody home"]),
+          msg("323", ["me", "End of /LIST"]),
+        ]
+      }
+      if (inner.command === "WHO") {
+        const ch = inner.params[0]
+        const rows: Record<string, Array<[string, string]>> = {
+          "#lobby": [["fix-auth", "H"], ["docs-bot", "G"], ["alice", "H*"]],
+          "#webapp": [["fix-auth", "H"], ["docs-bot", "G"]],
+          "#fix-auth": [["fix-auth", "H@"], ["fix-auth|explore1", "G"]],
+          "#quiet": [["docs-bot", "G"]],
+        }
+        return (rows[ch ?? ""] ?? []).map(([n, f]) => msg("352", ["me", ch ?? "", "u", "h", "srv", n, f, "0 x"]))
+      }
+      return []
+    }
+    const out = await h.run("list", {})
+    expect(out).toContain("Channels (4):")
+    expect(out).toContain("#lobby [lobby] 3 member(s), 2 awake — Everyone")
+    expect(out).toContain("#fix-auth [family] 2 member(s), 1 awake")
+    expect(out).toContain("#webapp [project/ad-hoc] 2 member(s), 1 awake")
+    expect(out).toContain("#quiet [project/ad-hoc] 1 member(s), 0 awake")
+    expect(h.link.queries[0]?.inner.command).toBe("LIST")
+
+    const active = await h.run("list", { activeOnly: true })
+    expect(active).toContain("Channels (3 active):")
+    expect(active).not.toContain("#quiet")
+  })
 })
 
 describe("release", () => {
@@ -565,7 +603,7 @@ describe("registerTools", () => {
     }
     const reg = await registerTools(fakeCtx as unknown as Parameters<typeof registerTools>[0], deps)
     expect(namespace?.name).toBe("irc")
-    expect(added.map((t) => t.name)).toEqual(["send", "ask", "wait", "read", "join", "part", "names", "release"])
+    expect(added.map((t) => t.name)).toEqual(["send", "ask", "wait", "read", "join", "part", "names", "list", "release"])
     expect(added.every((t) => t.options?.namespace === "irc")).toBe(true)
     const send = added.find((t) => t.name === "send")
     const res = await send?.execute({ target: "bob", text: "hi" }, { sessionID: "s1", signal: new AbortController().signal })

@@ -575,7 +575,7 @@ The link acts as the client of that account. The inner line is a normal
 client command.
 
 Allowed inner commands: `PRIVMSG`, `NOTICE`, `TAGMSG`, `JOIN`, `PART`,
-`TOPIC`, `NAMES`, `WHO`, `WHOIS`, `CHATHISTORY`, `MARKREAD`, and `BATCH` (only
+`TOPIC`, `NAMES`, `LIST`, `WHO`, `WHOIS`, `CHATHISTORY`, `MARKREAD`, and `BATCH` (only
 for `draft/multiline`, section 7.6).
 
 Not allowed inner commands:
@@ -718,7 +718,7 @@ tag (section 4.3) is on the outer `DELIVER` line only.
 
 ### 7.5 Query commands
 
-- For `NAMES`, `WHO`, `WHOIS`, `TOPIC`, `CHATHISTORY`, `MARKREAD`, `JOIN`,
+- For `NAMES`, `LIST`, `WHO`, `WHOIS`, `TOPIC`, `CHATHISTORY`, `MARKREAD`, `JOIN`,
   and `PART`, the replies come back in `DELIVER` lines.
 - When the inner line has a `label`, the server follows the labeled-response
   rules. One reply line has the `label` tag. Many reply lines are in an

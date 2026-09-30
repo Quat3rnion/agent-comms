@@ -31,7 +31,7 @@ describe("buildContext", () => {
       'IRC (agent-comms): you are "fix-auth" in #lobby, #agent-comms, #fix-auth. ' +
         "Unread: #agent-comms 3, DM docs-bot 1 (use irc_read). " +
         "Wake budget 2/10 used. " +
-        "Tools: irc_send (announce/reply; no acknowledgement-only messages), irc_ask (blocking question), irc_wait, irc_read, irc_join, irc_part, irc_names, irc_release.",
+        "Tools: irc_send (announce/reply; no acknowledgement-only messages), irc_ask (blocking question), irc_wait, irc_read, irc_join, irc_part, irc_names, irc_list, irc_release.",
     )
   })
 
