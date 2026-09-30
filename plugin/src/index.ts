@@ -184,6 +184,12 @@ export function normalizeEvent(ev: unknown): SessionEvent | null {
       if (t === "busy" || t === "retry") return { kind: "status", sessionID, busy: true }
       return null
     }
+    case "session.execution.started":
+      return { kind: "status", sessionID, busy: true }
+    case "session.execution.succeeded":
+    case "session.execution.failed":
+    case "session.execution.interrupted":
+      return { kind: "status", sessionID, busy: false }
     case "session.idle":
       return { kind: "idle", sessionID }
     default:

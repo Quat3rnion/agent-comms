@@ -317,12 +317,13 @@ export function decide(input: DecideInput): Decision {
   const { m, directedness, busy, optedOut, hopLimit, budget, now } = input
   if (optedOut) return { kind: "unread", reason: "opted-out" }
   if (directedness === "chatter") return { kind: "unread", reason: "chatter" }
-  if (m.rel === "operator" || m.role === "operator") {
-    return { kind: "push", mode: busy ? "steer" : "wake", countsAgainstBudget: false }
-  }
+  // @here reaches awake members only, also when the operator sends it.
   const addressed = input.addressed ?? !m.isChannel
   if (m.broadcast === "here" && !busy && !addressed) {
     return { kind: "unread", reason: "broadcast-here-dormant" }
+  }
+  if (m.rel === "operator" || m.role === "operator") {
+    return { kind: "push", mode: busy ? "steer" : "wake", countsAgainstBudget: false }
   }
   if (m.hop > hopLimit) return { kind: "unread", reason: "hop-limit" }
   if (busy) return { kind: "push", mode: "steer", countsAgainstBudget: false }

@@ -36,3 +36,22 @@ irctest:
     - apt-get install -y -qq python3 python3-venv git
   script:
     - tests/irctest/run.sh
+
+e2e:
+  stage: check
+  image: rust:1-bookworm
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  cache:
+    key: cargo
+    paths: [target/, .cargo/]
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq git curl unzip
+    - curl -fsSL https://bun.sh/install | bash
+    - export PATH="$HOME/.bun/bin:$PATH"
+  script:
+    - cargo build -p agent-comms
+    - cd plugin
+    - bun install --frozen-lockfile
+    - bun run test:e2e

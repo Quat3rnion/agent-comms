@@ -331,7 +331,7 @@ export async function startOpencode(options: StartOpencodeOptions): Promise<Test
     },
 
     async messages(sessionID) {
-      const page = await sdk.message.list({ sessionID, order: "asc", limit: 500 })
+      const page = await sdk.message.list({ sessionID, order: "asc", limit: 200 })
       return page.data
     },
 
