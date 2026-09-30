@@ -302,8 +302,11 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
       port: options.port,
       tls: options.tls,
       tlsCaPath: options.tlsCaPath,
+      // Several opencode servers can run at the same time (for example the shared
+      // service and an app-embedded server). Each process needs its own link name,
+      // or the links replace each other forever.
       linkName: linkName(
-        hostname(),
+        `${hostname()}-p${process.pid}`,
         `${ctx.location.project.id}.${createHash("sha256").update(ourDir).digest("hex").slice(0, 8)}`,
       ),
       token: () => readToken(options.tokenPath),
