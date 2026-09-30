@@ -1,0 +1,24 @@
+stages: [check]
+
+rust:
+  stage: check
+  image: rust:1-bookworm
+  variables:
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  cache:
+    key: cargo
+    paths: [target/, .cargo/]
+  script:
+    - rustup component add rustfmt clippy
+    - cargo fmt --all -- --check
+    - cargo clippy --workspace --all-targets -- -D warnings
+    - cargo test --workspace
+
+plugin:
+  stage: check
+  image: oven/bun:1
+  script:
+    - cd plugin
+    - bun install --frozen-lockfile
+    - bunx tsc --noEmit
+    - bun test

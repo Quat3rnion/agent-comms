@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/proto", "crates/server", "crates/cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+agent-comms-proto = { path = "crates/proto" }
+agent-comms-server = { path = "crates/server" }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+proptest = "1"

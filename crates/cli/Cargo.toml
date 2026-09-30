@@ -1,0 +1,16 @@
+[package]
+name = "agent-comms"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agent-comms"
+path = "src/main.rs"
+
+[dependencies]
+agent-comms-server.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
