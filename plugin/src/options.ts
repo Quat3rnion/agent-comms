@@ -17,6 +17,8 @@ export const DEFAULT_OPTIONS: Options = {
   tls: false,
   tlsCaPath: null,
   tokenPath: defaultTokenPath(),
+  serverName: "irc.agent-comms.local",
+  requireServerProof: true,
   hopLimit: 4,
   wakeBudget: 10,
   wakeWindowMs: 3_600_000,
@@ -90,6 +92,8 @@ export function parseOptions(raw: unknown): { options: Options; warnings: string
     "tls",
     "tlsCaPath",
     "tokenPath",
+    "serverName",
+    "requireServerProof",
     "claimEditTools",
     "editActions",
     ...INT_KEYS,
@@ -102,7 +106,7 @@ export function parseOptions(raw: unknown): { options: Options; warnings: string
     warnings.push(`option "${key}" must be ${expected}; using default`)
   }
 
-  for (const key of ["enabled", "tls"] as const) {
+  for (const key of ["enabled", "tls", "requireServerProof"] as const) {
     const v = src[key]
     if (v === undefined) continue
     if (typeof v === "boolean") options[key] = v
@@ -123,7 +127,7 @@ export function parseOptions(raw: unknown): { options: Options; warnings: string
     } else bad("failMode", 'one of "ask", "deny", "open"')
   }
 
-  for (const key of ["host", "tokenPath"] as const) {
+  for (const key of ["host", "tokenPath", "serverName"] as const) {
     const v = src[key]
     if (v === undefined) continue
     if (typeof v === "string" && v.trim() !== "") options[key] = v

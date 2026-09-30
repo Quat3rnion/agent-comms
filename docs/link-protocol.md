@@ -111,8 +111,8 @@ section. The inner tag section MUST NOT be more than 8191 bytes.
 
 The first command on a new connection decides the type of the connection:
 
-- The first command is `LINK`. The connection is a link. Sections 3 to 12
-  apply.
+- The first command is `LINK` or `CHALLENGE`. The connection is a link.
+  Sections 3 to 12 apply.
 - The first command is anything else. The connection is an ordinary IRC client.
 
 Protocol version: **1**.
@@ -121,7 +121,8 @@ Protocol version: **1**.
 
 A link connection has these states:
 
-1. `NEW`. The server waits for `LINK`.
+1. `NEW`. The server waits for `CHALLENGE` or `LINK`. After `CHALLENGE`, the
+   server sends `PROOF` and then waits for `LINK` (section 3.7).
 2. `LINKED`. The server sent `LINKED`. The server waits for the link `BURST`.
 3. `BURSTING`. The link sent `BURST`. The server accepts only `INTRODUCE`,
    `STATE`, `CLAIM`, `ENDBURST`, `PING`, and `PONG`.
@@ -197,6 +198,8 @@ The server sends `ERROR :<reason>` and closes the connection when:
 | Too many failures from this address   | `ERROR :rate limited`          |
 | The link name is not valid            | `ERROR :invalid link name`     |
 | `LINK` has wrong or missing parameters| `ERROR :malformed LINK`        |
+| The `CHALLENGE` nonce is not valid    | `ERROR :malformed CHALLENGE`   |
+| `CHALLENGE` after `CHALLENGE` or `LINK`| `ERROR :not allowed in this state` |
 
 The server MUST check the version before it checks the credential.
 
@@ -216,6 +219,64 @@ The server MUST check the version before it checks the credential.
 
 The owner of all accounts on a link is the owner of the credential. Today
 this is the single local user, with the owner name `operator`.
+
+### 3.7 Server identity: CHALLENGE and PROOF
+
+A local process can listen on the server address when the server is not
+running. Before the link sends its credential, the link can make the server
+prove that it knows the server key of the credential. This step is optional
+for the protocol, and the version stays 1. The plugin does this step by
+default.
+
+Terms:
+
+- `token`: the link token (section 3.3).
+- `server key`: lowercase hex of HMAC-SHA256 with the key `token` (the UTF-8
+  bytes) and the message `agent-comms server key v1`. The server stores the
+  server key with each credential (`server_key` in the secrets file). The
+  server key cannot authenticate a link.
+- `nonce`: 32 random bytes as 64 lowercase hex characters.
+- `server-name`: the name that the server sends in `LINKED`.
+
+The link sends, as its first line:
+
+```
+CHALLENGE <nonce>
+```
+
+The server sends one line:
+
+```
+PROOF [<proof>...]
+```
+
+- `proof` is lowercase hex of HMAC-SHA256 with the key `hex-decode(server
+  key)` and the message `agent-comms link proof v1|` + `nonce` + `|` +
+  `server-name`.
+- The server sends one proof for each credential that is not revoked and has
+  a server key. When there are more than 15 such credentials, the server sends
+  the proofs of the 15 most recent credentials (by `created`).
+- When no credential has a server key, the server sends `PROOF` with no
+  parameters.
+- The server does only HMAC work for `CHALLENGE`. `CHALLENGE` is not a
+  handshake failure (section 11).
+
+Then the link sends `LINK` (section 3.1) on the same connection.
+
+Rules:
+
+- The link calculates the expected proof from its token, its nonce, and the
+  server name that it expects. The link MUST NOT send `LINK` when no parameter
+  of `PROOF` is equal to the expected proof. The link closes the connection
+  and tries again later with backoff.
+- The link MUST use a new nonce for each connection.
+- The server sends `ERROR :malformed CHALLENGE` and closes when the nonce is
+  missing or is not 64 lowercase hex characters.
+- The server sends `ERROR :not allowed in this state` and closes for a second
+  `CHALLENGE`, for `CHALLENGE` after `LINK`, and for a command other than
+  `LINK` after `PROOF`.
+- A credential from before this step has no server key. The operator makes a
+  new credential with `agent-comms token rotate`.
 
 ## 4. Burst
 
@@ -876,7 +937,8 @@ and then closes the connection. Protocol violations are:
 
 - An unknown command before `LINKED`.
 - A command that the current state does not allow (section 2.6).
-- `LINK` after `LINKED`.
+- `LINK` or `CHALLENGE` after `LINKED`.
+- A second `CHALLENGE`, or a command other than `LINK` after `PROOF`.
 - A line over the limits, or a line that is not valid UTF-8.
 - A second `BURST`.
 - A handshake failure (section 3.4).
@@ -936,6 +998,9 @@ after `LINKED`. The link SHOULD ignore an unknown command from the server
 - The server SHOULD refuse a link over a non-TLS connection from a
   non-loopback address.
 - The link and the server MUST NOT write the credential to logs.
+- A link SHOULD send `CHALLENGE` and check `PROOF` before it sends the
+  credential (section 3.7). Then a process that is not the server cannot get
+  the credential, and cannot send false `AGENT` or operator lines to the link.
 
 ## 12. Keepalive and versioning
 
@@ -965,6 +1030,8 @@ both directions. All lines can carry a `label` tag (section 5).
 
 | Verb          | Dir   | Syntax                                                                                  | Replies                                              |
 |---------------|-------|-----------------------------------------------------------------------------------------|------------------------------------------------------|
+| `CHALLENGE`   | L>S   | `CHALLENGE <nonce>` (first line only)                                                   | `PROOF`, or `ERROR`                                  |
+| `PROOF`       | S>L   | `PROOF [<proof>...]` (0 to 15 proofs)                                                   | none (the link sends `LINK` or closes)               |
 | `LINK`        | L>S   | `LINK <version> <link-name> <credential>`                                               | `LINKED`, or `ERROR`                                 |
 | `LINKED`      | S>L   | `LINKED <version> <server-name>`                                                        | none                                                 |
 | `BURST`       | S<>L  | `BURST`                                                                                 | none                                                 |
@@ -1022,7 +1089,20 @@ direction.
 
 ### 14.1 Connect
 
-The link sends:
+The link sends a challenge:
+
+```
+CHALLENGE 00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff
+```
+
+The server sends the proof for the token `EXAMPLE_LINK_TOKEN` (server key
+`c26368d7583f4640030626d8488806cd8e6a6d374a5dd3908353288eafa53c02`):
+
+```
+PROOF 39a747f1a375081092d6ad092308d2daa6e064d52c26248ad4531430207b646e
+```
+
+The proof is correct. The link sends:
 
 ```
 LINK 1 svc-local.prj-webapp EXAMPLE_LINK_TOKEN

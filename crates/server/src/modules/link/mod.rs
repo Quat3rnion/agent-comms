@@ -6,8 +6,8 @@
 //! - `accounts.rs`: INTRODUCE, RENAME, RETIRE, STATE, family channels,
 //!   restore after server restart, dormant presence, membership persistence,
 //!   inactivity retirement.
-//! - `send.rs`: SEND (inner client commands), SENT/SENDFAIL acks, delivery
-//!   cursor updates.
+//! - `send.rs`: SEND (inner client commands), SEND flood control, SENT/SENDFAIL
+//!   acks, delivery cursor updates.
 //! - `replay.rs`: the server burst (BURST, extension lines, replay, ENDBURST)
 //!   and attaching the link handle to its accounts.
 //!
@@ -47,6 +47,11 @@ pub struct LinkShared {
     pub restored: AtomicBool,
     /// Last inactivity-retirement check.
     pub last_inactivity_check: parking_lot::Mutex<Option<Instant>>,
+    /// SEND flood state for each link name, created on the first SEND.
+    /// Kept across reconnects, so that a reconnect does not refill it.
+    pub link_flood: parking_lot::Mutex<HashMap<String, send::LinkFlood>>,
+    /// SEND message bucket and last use for each account (folded ID).
+    pub account_flood: parking_lot::Mutex<HashMap<String, send::AccountFlood>>,
 }
 
 /// Link protocol states (section 2.6).
@@ -114,6 +119,8 @@ impl LinkModule {
                 captured: parking_lot::Mutex::new(HashMap::new()),
                 restored: AtomicBool::new(false),
                 last_inactivity_check: parking_lot::Mutex::new(None),
+                link_flood: parking_lot::Mutex::new(HashMap::new()),
+                account_flood: parking_lot::Mutex::new(HashMap::new()),
             }),
         }
     }

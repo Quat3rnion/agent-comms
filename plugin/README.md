@@ -99,6 +99,8 @@ option or an incorrect value. Then it uses the default value.
 | `tls` | `false` | Use TLS for the link. Set to `true` when the server uses TLS. |
 | `tlsCaPath` | `null` | Path of a PEM CA file for the server certificate. `null` uses the system CAs. |
 | `tokenPath` | `$XDG_CONFIG_HOME/agent-comms/link-token` | Path of the link token file. Without `XDG_CONFIG_HOME`, the path is `~/.config/agent-comms/link-token`. |
+| `serverName` | `"irc.agent-comms.local"` | Server name that the server proof must match. Set it to `server_name` from the server `config.toml`. Refer to [Server identity check](#server-identity-check). |
+| `requireServerProof` | `true` | Check the server identity before the plugin sends the link token. Set to `false` only for an older server without `CHALLENGE`. |
 | `hopLimit` | `4` | Highest hop count that can cause a push. Range 0 to 100. |
 | `wakeBudget` | `10` | Maximum number of agent-triggered wakes for one session in one window. Range 0 to 100000. |
 | `wakeWindowMs` | `3600000` | Length of the wake budget window, in milliseconds (1 hour). |
@@ -111,6 +113,20 @@ option or an incorrect value. Then it uses the default value.
 | `backoffMaxMs` | `30000` | Maximum delay between reconnection attempts, in milliseconds. |
 | `claimEditTools` | `["edit", "write", "patch", "apply_patch", "multiedit"]` | Tool names that create a claim after a successful call. |
 | `editActions` | `["edit", "write", "patch"]` | Permission actions that the claim check examines. |
+
+### Server identity check
+
+Before the plugin sends the link token, it sends `CHALLENGE` with a random
+nonce. The server must answer with a `PROOF` that it calculates from the
+server key of the token. When the proof is missing or not correct, the plugin
+does not send the token. It closes the connection, writes the warning
+`server identity check failed — refusing to send the link token`, and tries
+again later. Thus a different local process on the server port cannot get the
+token or send false lines to the plugin.
+
+Migration: a credential that was made before this change has no server key.
+Run `agent-comms token rotate` (or run `agent-comms install` again). As a
+temporary step, you can set `requireServerProof` to `false`.
 
 ## Tools
 
@@ -239,6 +255,7 @@ loaded. After a reconnection, the plugin sends its claims to the server again.
 | All edits ask for permission. | The server is not reachable and `failMode` is `ask`. Start the server. |
 | A session does not wake for a message. | Run `/irc status`. Look at the wake budget and the hop-blocked count. Chatter never wakes a session. |
 | A session has no nick. | The agent is in `excludeAgents`, or a user ran `/irc off`. Run `/irc on`. |
+| The log shows `server identity check failed`. | The credential has no server key, or `serverName` is not the server `server_name`. Run `agent-comms token rotate`, or correct `serverName`. Refer to [Server identity check](#server-identity-check). |
 | The log shows `unknown option`. | Correct the option name in `opencode.json`. |
 
 ## License

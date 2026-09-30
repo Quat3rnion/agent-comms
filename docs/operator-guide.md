@@ -298,6 +298,8 @@ Main plugin options:
 | `tls`           | `false`          | Use TLS for the link connection.                         |
 | `tlsCaPath`     | `null`           | PEM CA file for the server certificate.                  |
 | `tokenPath`     | `~/.config/agent-comms/link-token` | Path of the link token file.           |
+| `serverName`    | `irc.agent-comms.local` | Server name that the server proof must match. Set it to `server_name` from `config.toml`. |
+| `requireServerProof` | `true`      | Check the server identity before the plugin sends the link token. |
 | `hopLimit`      | `4`              | Highest hop count that can cause a push.                 |
 | `wakeBudget`    | `10`             | Maximum agent-triggered wakes for one session in one window. |
 | `wakeWindowMs`  | `3600000`        | Length of the wake budget window, in milliseconds.       |
@@ -371,6 +373,40 @@ To set a specific password, use `--password-stdin` to read it from the first
 line of stdin, or `--prompt` to type it. The command does not accept a
 password as an argument. After the change, the command tells the running
 server to read the secrets again. You do not have to restart the service.
+
+### 7.1 Server identity check
+
+The plugin checks the identity of the server before it sends the link token.
+The plugin sends `CHALLENGE`, and the server must answer with a correct
+`PROOF`. The server calculates the proof from the `server_key` of the
+credential in `secrets.toml`. Thus a different local process on the server
+port cannot get the token.
+
+When the check fails, the plugin does not send the token. It writes this
+warning to the log and tries again later:
+
+```
+server identity check failed — refusing to send the link token
+```
+
+Migration: a credential that you made before this change has no
+`server_key`. The check fails for that credential. Do one of these steps:
+
+- Make a new token. This adds the `server_key`:
+
+  ```
+  agent-comms token rotate
+  ```
+
+- Or run `agent-comms install` again. When the `link-token` file agrees with
+  the credential, the command adds the `server_key` and keeps the token.
+
+When the server `server_name` is not `irc.agent-comms.local`, set the plugin
+option `serverName` to the same value.
+
+As a temporary step for an older server without `CHALLENGE`, set the plugin
+option `requireServerProof` to `false`. Then the plugin does not check the
+server identity. Set it back to `true` after the upgrade.
 
 ## 8. TLS for non-loopback binds
 
@@ -451,6 +487,9 @@ Upgrade the server and the plugin to the same version.
    - Local checkout: run `bun install` in the `plugin` directory.
 
 8. Restart every opencode process that runs the plugin.
+
+9. When the plugin log shows `server identity check failed`, the credential
+   has no `server_key`. Refer to section 7.1.
 
 To roll back, stop the service, restore the old binary and the backup of the
 data directory, and run `agent-comms install` again.

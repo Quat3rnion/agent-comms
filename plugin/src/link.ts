@@ -1,3 +1,4 @@
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 import { readFile } from "node:fs/promises"
 import { createConnection, isIP } from "node:net"
 import type { Socket } from "node:net"
@@ -37,6 +38,10 @@ export interface LinkClientOptions {
   pingAfterMs?: number
   /** Drop the connection after this much silence. Default 120000. */
   deadAfterMs?: number
+  /** Server name that the server PROOF must match. Default "irc.agent-comms.local". */
+  serverName?: string
+  /** Send CHALLENGE and verify PROOF before LINK. Default true. */
+  requireServerProof?: boolean
 }
 
 export interface LinkEvents {
@@ -50,6 +55,30 @@ export interface LinkEvents {
 const PROTOCOL_VERSION = "1"
 const CONNECT_TIMEOUT_MS = 10_000
 const MAX_PENDING_BYTES = 1_048_576
+const DEFAULT_SERVER_NAME = "irc.agent-comms.local"
+const SERVER_KEY_LABEL = "agent-comms server key v1"
+const PROOF_LABEL = "agent-comms link proof v1|"
+
+/** Server key of a link token: HMAC-SHA256(key = token, message = "agent-comms server key v1"), lowercase hex. */
+export function deriveServerKey(token: string): string {
+  return createHmac("sha256", token).update(SERVER_KEY_LABEL).digest("hex")
+}
+
+/**
+ * Proof that the server knows the server key: HMAC-SHA256(key = hex-decoded server key,
+ * message = "agent-comms link proof v1|" + nonce + "|" + server name), lowercase hex.
+ */
+export function serverProof(serverKeyHex: string, nonce: string, serverName: string): string {
+  return createHmac("sha256", Buffer.from(serverKeyHex, "hex"))
+    .update(`${PROOF_LABEL}${nonce}|${serverName}`)
+    .digest("hex")
+}
+
+function sameHex(a: string, b: string): boolean {
+  const x = Buffer.from(a, "utf8")
+  const y = Buffer.from(b, "utf8")
+  return x.length === y.length && timingSafeEqual(x, y)
+}
 
 /** Backoff delay: 500ms * 2^attempt, capped at maxMs, with +-20% jitter. */
 export function backoffDelay(attempt: number, maxMs: number, rand: () => number = Math.random): number {
@@ -149,7 +178,12 @@ function mapSendReply(m: IrcMessage): SendResult {
   }
 }
 
-type Phase = "idle" | "handshake" | "linked"
+type Phase = "idle" | "challenge" | "handshake" | "linked"
+
+interface Challenge {
+  token: string
+  expected: string
+}
 
 export class LinkClient implements LinkApi {
   private readonly opts: LinkClientOptions
@@ -157,6 +191,8 @@ export class LinkClient implements LinkApi {
   private readonly requestTimeoutMs: number
   private readonly pingAfterMs: number
   private readonly deadAfterMs: number
+  private readonly serverName: string
+  private readonly requireServerProof: boolean
 
   private _state: LinkState = "down"
   private phase: Phase = "idle"
@@ -165,6 +201,7 @@ export class LinkClient implements LinkApi {
   private gen = 0
   private attempt = 0
   private conn: LinkConn | null = null
+  private challenge: Challenge | null = null
   private splitter = new LineSplitter()
   private serverBurstSeen = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -183,6 +220,8 @@ export class LinkClient implements LinkApi {
     this.requestTimeoutMs = opts.requestTimeoutMs ?? 15_000
     this.pingAfterMs = opts.pingAfterMs ?? 60_000
     this.deadAfterMs = opts.deadAfterMs ?? 120_000
+    this.serverName = opts.serverName ?? DEFAULT_SERVER_NAME
+    this.requireServerProof = opts.requireServerProof ?? true
   }
 
   get state(): LinkState {
@@ -291,18 +330,58 @@ export class LinkClient implements LinkApi {
     }
     this.conn = conn
     this.splitter = new LineSplitter()
-    this.phase = "handshake"
     this.serverBurstSeen = false
+    let first: IrcMessage
+    if (this.requireServerProof) {
+      // The token goes out only after the server proves that it knows the server key.
+      const nonce = randomBytes(32).toString("hex")
+      this.challenge = { token, expected: serverProof(deriveServerKey(token), nonce, this.serverName) }
+      this.phase = "challenge"
+      first = msg("CHALLENGE", [nonce])
+    } else {
+      this.phase = "handshake"
+      first = this.linkMsg(token)
+    }
     conn.onData((chunk) => this.onData(gen, chunk))
     conn.onClose((err) => this.handleClose(gen, err))
     this.startKeepalive()
+    this.writeFirst(gen, conn, first)
+  }
+
+  private linkMsg(token: string): IrcMessage {
+    return msg("LINK", [PROTOCOL_VERSION, this.opts.linkName, token])
+  }
+
+  /** Write a handshake line. The LINK line holds the token: never log it. */
+  private writeFirst(gen: number, conn: LinkConn, m: IrcMessage): void {
     try {
-      // The token appears only in this line. Never log it.
-      conn.write(serializeLine(msg("LINK", [PROTOCOL_VERSION, this.opts.linkName, token])) + "\r\n")
+      conn.write(serializeLine(m) + "\r\n")
     } catch (e) {
       this.log("warn", `write failed: ${(e as Error).message}`)
       this.handleClose(gen)
     }
+  }
+
+  /** Check the server PROOF. Send LINK when one proof matches; otherwise close without the token. */
+  private handleProof(gen: number, m: IrcMessage): void {
+    const challenge = this.challenge
+    this.challenge = null
+    const conn = this.conn
+    const ok =
+      challenge !== null && m.command === "PROOF" && m.params.some((p) => sameHex(p, challenge.expected))
+    if (!ok || conn === null || challenge === null) {
+      this.log("warn", "server identity check failed — refusing to send the link token", {
+        reply: m.command,
+        hint:
+          m.command === "PROOF"
+            ? "check the serverName option and run `agent-comms token rotate` for a credential without a server key"
+            : "the server does not support CHALLENGE; set requireServerProof false only for a trusted older server",
+      })
+      this.handleClose(gen, new Error("server identity check failed"))
+      return
+    }
+    this.phase = "handshake"
+    this.writeFirst(gen, conn, this.linkMsg(challenge.token))
   }
 
   private handleClose(gen: number, err?: Error): void {
@@ -314,6 +393,7 @@ export class LinkClient implements LinkApi {
     const prev = this._state
     this._state = "down"
     this.phase = "idle"
+    this.challenge = null
     if (err) this.log("warn", `link closed: ${err.message}`)
     else if (prev !== "down") this.log("info", "link closed")
     if (conn) {
@@ -414,6 +494,10 @@ export class LinkClient implements LinkApi {
     if (m.command === "ERROR") {
       this.log("warn", `server sent ERROR: ${m.params[0] ?? ""}`)
       this.handleClose(gen, new Error(`server error: ${m.params[0] ?? ""}`))
+      return
+    }
+    if (this.phase === "challenge") {
+      if (m.command !== "PING" && m.command !== "PONG") this.handleProof(gen, m)
       return
     }
     if (this.phase === "handshake") {

@@ -308,6 +308,8 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
       ),
       token: () => readToken(options.tokenPath),
       backoffMaxMs: options.backoffMaxMs,
+      serverName: options.serverName,
+      requireServerProof: options.requireServerProof,
       burst,
       log: (level, message) => log(level, message),
     })

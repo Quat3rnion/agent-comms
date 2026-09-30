@@ -2,6 +2,7 @@
 //! acknowledgements, and delivery cursor updates (section 4.3).
 
 use super::{LinkCtx, LinkShared};
+use crate::flood::TokenBucket;
 use crate::handlers;
 use crate::module::{Cx, Flow, MessageEvent};
 use crate::ops;
@@ -9,7 +10,150 @@ use crate::state::SharedState;
 use crate::user::{Sink, UserId};
 use crate::util::unix_now;
 use agent_comms_proto::{Limits, Message};
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+/// Flood state entries unused for this time are removed.
+const FLOOD_IDLE: Duration = Duration::from_secs(600);
+
+/// Maximum open multiline batches that one link can have.
+const MAX_OPEN_BATCHES: usize = 64;
+
+/// SEND flood state of one link (section 7.2, code FLOOD).
+pub struct LinkFlood {
+    /// One token for each SEND line.
+    bucket: TokenBucket,
+    last: Instant,
+    /// Open multiline batches: (folded account, reference) to true when the
+    /// opening line was accepted, false when it was refused.
+    batches: HashMap<(String, String), bool>,
+}
+
+/// SEND flood state of one account: one token for each message and query.
+pub struct AccountFlood {
+    bucket: TokenBucket,
+    last: Instant,
+}
+
+/// Flood-control class of one inner line.
+#[derive(Clone, Copy)]
+enum Line<'a> {
+    /// Standalone PRIVMSG, NOTICE or TAGMSG.
+    Message,
+    /// Query command.
+    Query,
+    /// `BATCH +<ref> draft/multiline ...`.
+    Open(&'a str),
+    /// Message line inside a multiline batch.
+    Part(&'a str),
+    /// `BATCH -<ref>`.
+    Close(&'a str),
+}
+
+enum Verdict {
+    /// Run the line.
+    Pass,
+    /// Do not run the line and send no reply.
+    Drop,
+    /// Do not run the line and reply with code FLOOD.
+    Flood,
+}
+
+/// Charge the link and account buckets for one inner line.
+///
+/// Each SEND line costs one link token. Each message and query costs one
+/// account token; a multiline batch costs one account token at its opening
+/// line. Lines inside, and the closing line of, an accepted batch are never
+/// refused, so that the batch stays whole. When the opening line of a batch is
+/// refused, the server drops its message lines and sends one SENDFAIL FLOOD at
+/// the closing line.
+fn check_flood(shared: &LinkShared, link: &str, account: &str, line: Line<'_>) -> Verdict {
+    let limits = &shared.config.limits;
+    let now = Instant::now();
+    let folded = crate::util::fold(account);
+
+    let mut links = shared.link_flood.lock();
+    if !links.contains_key(link) {
+        links.retain(|_, f| now.duration_since(f.last) <= FLOOD_IDLE);
+        links.insert(
+            link.to_string(),
+            LinkFlood {
+                bucket: TokenBucket::new(limits.link_flood_burst, limits.link_flood_rate_per_sec),
+                last: now,
+                batches: HashMap::new(),
+            },
+        );
+    }
+    let Some(lf) = links.get_mut(link) else {
+        return Verdict::Pass;
+    };
+    lf.last = now;
+
+    let reference = match line {
+        Line::Part(r) | Line::Close(r) => {
+            let close = matches!(line, Line::Close(_));
+            let key = (folded, r.to_string());
+            let known = if close {
+                lf.batches.remove(&key)
+            } else {
+                lf.batches.get(&key).copied()
+            };
+            return match known {
+                Some(accepted) => {
+                    let _ = lf.bucket.take();
+                    match (accepted, close) {
+                        (true, _) => Verdict::Pass,
+                        (false, true) => Verdict::Flood,
+                        (false, false) => Verdict::Drop,
+                    }
+                }
+                None if lf.bucket.try_take() => Verdict::Pass,
+                None if close => Verdict::Flood,
+                None => Verdict::Drop,
+            };
+        }
+        Line::Open(r) => Some(r),
+        Line::Message | Line::Query => None,
+    };
+
+    let accepted = lf.bucket.try_take() && {
+        let mut accounts = shared.account_flood.lock();
+        if !accounts.contains_key(&folded) {
+            accounts.retain(|_, f| now.duration_since(f.last) <= FLOOD_IDLE);
+            accounts.insert(
+                folded.clone(),
+                AccountFlood {
+                    bucket: TokenBucket::new(
+                        limits.account_flood_burst,
+                        limits.account_flood_rate_per_sec,
+                    ),
+                    last: now,
+                },
+            );
+        }
+        accounts.get_mut(&folded).is_some_and(|af| {
+            af.last = now;
+            af.bucket.try_take()
+        })
+    };
+
+    match reference {
+        Some(r) => {
+            if lf.batches.len() >= MAX_OPEN_BATCHES {
+                lf.batches.clear();
+            }
+            lf.batches.insert((folded, r.to_string()), accepted);
+            if accepted {
+                Verdict::Pass
+            } else {
+                Verdict::Drop
+            }
+        }
+        None if accepted => Verdict::Pass,
+        None => Verdict::Flood,
+    }
+}
 
 /// Inner commands that a link can send for an account.
 const ALLOWED: &[&str] = &[
@@ -114,6 +258,36 @@ pub fn handle(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, 
         "PRIVMSG" | "NOTICE" | "TAGMSG" => Kind::Message,
         _ => Kind::Query,
     };
+
+    let line_kind = match cmd.as_str() {
+        "BATCH" => {
+            let reference = inner.param(0).unwrap_or("");
+            match reference.strip_prefix('+') {
+                Some(r) => Line::Open(r),
+                None => Line::Close(reference.get(1..).unwrap_or("")),
+            }
+        }
+        _ => match (&kind, inner.tag("batch")) {
+            (Kind::BatchPart, Some(r)) => Line::Part(r),
+            (Kind::Query, _) => Line::Query,
+            _ => Line::Message,
+        },
+    };
+    match check_flood(shared, &ctx.entry.name, &account, line_kind) {
+        Verdict::Pass => {}
+        Verdict::Drop => return,
+        Verdict::Flood => {
+            if let Kind::Query = kind {
+                ctx.fail(msg, "FLOOD", &[&account], "too many requests");
+            } else {
+                ctx.reply(
+                    msg,
+                    sendfail(&account, "FLOOD", "too many messages; slow down"),
+                );
+            }
+            return;
+        }
+    }
 
     if let Some(store) = shared.hub.store() {
         let _ = store.touch(&account, unix_now());

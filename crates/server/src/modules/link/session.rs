@@ -26,14 +26,37 @@ const PROTOCOL_VERSION: &str = "1";
 /// channel event. The link queue holds this many times the queue of one
 /// client connection (65536 lines with the default `outbound_queue`).
 const LINK_QUEUE_FACTOR: usize = 16;
+/// Time that a link has to send `LINK` after the `PROOF` reply.
+const CHALLENGE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Maximum number of proofs in one `PROOF` line.
+const MAX_PROOFS: usize = 15;
+/// Length of a `CHALLENGE` nonce: 32 bytes as lowercase hex.
+const NONCE_LEN: usize = 64;
+const PROOF_LABEL: &[u8] = b"agent-comms link proof v1|";
 
-/// Start the task for a link connection whose first line is `first` (`LINK`).
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+/// Start the task for a link connection whose first line is `first`
+/// (`LINK` or `CHALLENGE`).
 pub fn spawn(shared: Arc<LinkShared>, state: SharedState, conn: LineConn, first: Message) {
     tokio::spawn(run(shared, state, conn, first));
 }
 
 async fn run(shared: Arc<LinkShared>, state: SharedState, mut conn: LineConn, first: Message) {
     let peer = conn.peer;
+
+    let first = if first.command_upper() == "CHALLENGE" {
+        match challenge(&state, &mut conn, &first).await {
+            Ok(link) => link,
+            Err(Some(reason)) => {
+                let _ = conn.write_line(&format!("ERROR :{reason}")).await;
+                return;
+            }
+            Err(None) => return,
+        }
+    } else {
+        first
+    };
 
     let credential = match handshake(&shared, &state, peer, conn.is_tls, &first).await {
         Ok(c) => c,
@@ -101,6 +124,85 @@ async fn run(shared: Arc<LinkShared>, state: SharedState, mut conn: LineConn, fi
     outbound.close_with("link closed");
     let _ = tokio::time::timeout(Duration::from_secs(5), writer_task).await;
     tracing::info!(link = %name, peer = %peer, reason = %reason, "link down");
+}
+
+/// Answer `CHALLENGE <nonce>` with `PROOF [<proof>...]`, then read the next
+/// line, which must be `LINK`. Returns the `LINK` message, or the reason for
+/// the `ERROR` line (`None`: close without `ERROR`).
+async fn challenge(
+    state: &SharedState,
+    conn: &mut LineConn,
+    first: &Message,
+) -> Result<Message, Option<&'static str>> {
+    let nonce = match first.params.as_slice() {
+        [n] if valid_nonce(n) => n,
+        _ => return Err(Some("malformed CHALLENGE")),
+    };
+    let proofs = server_proofs(state, nonce);
+    let line = if proofs.is_empty() {
+        "PROOF".to_string()
+    } else {
+        format!("PROOF {}", proofs.join(" "))
+    };
+    conn.write_line(&line).await.map_err(|_| None)?;
+
+    let deadline = Instant::now() + CHALLENGE_TIMEOUT;
+    loop {
+        let read = tokio::time::timeout_at(deadline, conn.read_line(LINK_LINE_MAX)).await;
+        let line = match read {
+            Ok(Ok(Some(Ok(line)))) => line,
+            Ok(Ok(Some(Err(LineError::TooLong)))) => return Err(Some("line too long")),
+            Ok(Ok(Some(Err(LineError::InvalidUtf8)))) => return Err(Some("invalid UTF-8")),
+            _ => return Err(None),
+        };
+        match Message::parse_with(&line, Limits::LINK) {
+            Ok(m) if m.command_upper() == "LINK" => return Ok(m),
+            Ok(_) => return Err(Some("not allowed in this state")),
+            Err(ParseError::Empty) => continue,
+            Err(ParseError::BodyTooLong | ParseError::TagsTooLong) => {
+                return Err(Some("line too long"))
+            }
+            Err(_) => return Err(Some("malformed LINK")),
+        }
+    }
+}
+
+fn valid_nonce(nonce: &str) -> bool {
+    nonce.len() == NONCE_LEN
+        && nonce
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// One proof for each non-revoked credential with a server key (the most
+/// recent `MAX_PROOFS` by `created`). HMAC only: no argon2 work here.
+fn server_proofs(state: &SharedState, nonce: &str) -> Vec<String> {
+    let mut keys: Vec<(i64, String)> = state
+        .secrets
+        .read()
+        .links
+        .iter()
+        .filter(|c| !c.revoked)
+        .filter_map(|c| c.server_key.clone().map(|k| (c.created, k)))
+        .collect();
+    keys.sort_by(|a, b| b.0.cmp(&a.0));
+    keys.iter()
+        .filter_map(|(_, key)| server_proof(key, nonce, &state.config.server_name))
+        .take(MAX_PROOFS)
+        .collect()
+}
+
+/// Lowercase hex of HMAC-SHA256(key = hex-decoded `server_key`,
+/// message = "agent-comms link proof v1|" + nonce + "|" + server name).
+fn server_proof(server_key: &str, nonce: &str, server_name: &str) -> Option<String> {
+    use hmac::Mac;
+    let key = hex::decode(server_key).ok()?;
+    let mut mac = HmacSha256::new_from_slice(&key).ok()?;
+    mac.update(PROOF_LABEL);
+    mac.update(nonce.as_bytes());
+    mac.update(b"|");
+    mac.update(server_name.as_bytes());
+    Some(hex::encode(mac.finalize().into_bytes()))
 }
 
 /// Check the `LINK` line. Returns the matching credential, or the reason for
@@ -319,7 +421,7 @@ fn dispatch(
             return Ok(Next::Continue);
         }
         "PONG" => return Ok(Next::Continue),
-        "LINK" => return Err("not allowed in this state"),
+        "LINK" | "CHALLENGE" => return Err("not allowed in this state"),
         "BURST" => {
             if ctx.phase != LinkPhase::Linked {
                 return Err("duplicate burst");

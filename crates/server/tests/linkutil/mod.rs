@@ -53,8 +53,37 @@ pub fn secrets_with_link(op_pw: &str, token: &str) -> Secrets {
             token_hash: hash(token),
             created: 0,
             revoked: false,
+            server_key: Some(server_key(token)),
         }],
     }
+}
+
+fn hmac_hex(key: &[u8], parts: &[&[u8]]) -> String {
+    use hmac::Mac;
+    let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(key).expect("hmac key");
+    for p in parts {
+        mac.update(p);
+    }
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Server key of `token`: hex of HMAC-SHA256(token, "agent-comms server key v1").
+pub fn server_key(token: &str) -> String {
+    hmac_hex(token.as_bytes(), &[b"agent-comms server key v1"])
+}
+
+/// Expected `PROOF` value for `token`, `nonce`, and `server_name`.
+pub fn expected_proof(token: &str, nonce: &str, server_name: &str) -> String {
+    let key = hex::decode(server_key(token)).expect("hex server key");
+    hmac_hex(
+        &key,
+        &[
+            b"agent-comms link proof v1|",
+            nonce.as_bytes(),
+            b"|",
+            server_name.as_bytes(),
+        ],
+    )
 }
 
 fn cached_secrets() -> Secrets {
@@ -295,6 +324,13 @@ impl FakeLink {
                 }
             }
         }
+    }
+
+    /// Send `CHALLENGE <nonce>` and wait for `PROOF` (or `ERROR`).
+    pub async fn challenge(&mut self, nonce: &str) -> Message {
+        self.send(&format!("CHALLENGE {nonce}")).await;
+        self.expect(|m| is_cmd(m, "PROOF") || is_cmd(m, "ERROR"))
+            .await
     }
 
     /// Send `LINK 1 <name> <token>` and wait for `LINKED`.

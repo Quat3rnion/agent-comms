@@ -18,6 +18,9 @@ toml.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 argon2 = "0.5"
 rand = "0.8"
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
 rpassword = "7"
 hostname = "0.4"
 

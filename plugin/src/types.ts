@@ -19,6 +19,16 @@ export interface Options {
   tlsCaPath: string | null
   /** File with the link token. Default ~/.config/agent-comms/link-token. */
   tokenPath: string
+  /**
+   * Server name that the server proof must match (the server `server_name`).
+   * Default "irc.agent-comms.local".
+   */
+  serverName: string
+  /**
+   * Send CHALLENGE and verify the server PROOF before the link token goes out.
+   * Set false only for servers without CHALLENGE support. Default true.
+   */
+  requireServerProof: boolean
   hopLimit: number
   wakeBudget: number
   wakeWindowMs: number

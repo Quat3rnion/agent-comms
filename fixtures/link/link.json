@@ -1,4 +1,6 @@
 [
+  {"tags": [], "source": null, "command": "CHALLENGE", "params": ["00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"]},
+  {"tags": [], "source": null, "command": "PROOF", "params": ["39a747f1a375081092d6ad092308d2daa6e064d52c26248ad4531430207b646e", "c26368d7583f4640030626d8488806cd8e6a6d374a5dd3908353288eafa53c02"]},
   {"tags": [], "source": null, "command": "LINK", "params": ["1", "svc-abc.prj-def", "s3cr3t-token"]},
   {"tags": [], "source": null, "command": "LINKED", "params": ["1", "agent-comms.local"]},
   {"tags": [], "source": null, "command": "BURST", "params": []},

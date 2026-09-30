@@ -39,6 +39,18 @@ impl TokenBucket {
             Some(Duration::from_secs_f64(-self.tokens / self.rate))
         }
     }
+
+    /// Take one token only when one is available now. Returns false (and
+    /// takes nothing) when the bucket is empty.
+    pub fn try_take(&mut self) -> bool {
+        self.refill();
+        if self.tokens >= 1.0 {
+            self.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[cfg(test)]
@@ -52,5 +64,14 @@ mod tests {
         assert!(b.take().is_none());
         assert!(b.take().is_none());
         assert!(b.take().is_some());
+    }
+
+    #[test]
+    fn try_take_does_not_go_negative() {
+        let mut b = TokenBucket::new(2, 1);
+        assert!(b.try_take());
+        assert!(b.try_take());
+        assert!(!b.try_take());
+        assert!(!b.try_take());
     }
 }

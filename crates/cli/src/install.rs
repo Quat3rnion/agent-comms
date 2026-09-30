@@ -93,6 +93,11 @@ pub fn run(config_dir: &Path, args: &InstallArgs) -> Result<()> {
         secrets_file::write_private_file(&token_path, t.as_bytes())?;
         new_token = true;
     } else {
+        // Credentials from before the server key existed: add the key when
+        // the token file still matches the credential.
+        if let Ok(t) = std::fs::read_to_string(&token_path) {
+            token::backfill_server_key(&mut secrets, &host, t.trim());
+        }
         secrets_file::write_secrets(&config.secrets_path, &secrets)?;
     }
     println!("Secrets file {}", config.secrets_path.display());

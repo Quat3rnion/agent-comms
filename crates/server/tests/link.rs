@@ -805,3 +805,65 @@ async fn chathistory_via_send() {
         .collect();
     assert_eq!(texts, ["first", "second"], "{}", dump(&lines));
 }
+
+// 20
+const NONCE: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+#[tokio::test]
+async fn challenge_proof_then_link() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let mut l = FakeLink::connect(srv.local_addr).await;
+    let m = l.challenge(NONCE).await;
+    assert!(is_cmd(&m, "PROOF"), "no PROOF: {}", m.to_line());
+    assert_eq!(
+        m.params,
+        [expected_proof(TOKEN, NONCE, "irc.agent-comms.local")],
+        "wrong PROOF: {}",
+        m.to_line()
+    );
+    let linked = l.handshake(LINK_A, TOKEN).await;
+    assert_eq!(linked.param(1), Some("irc.agent-comms.local"));
+}
+
+// 21
+#[tokio::test]
+async fn challenge_twice_refused() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let mut l = FakeLink::connect(srv.local_addr).await;
+    let m = l.challenge(NONCE).await;
+    assert!(is_cmd(&m, "PROOF"), "no PROOF: {}", m.to_line());
+    l.send(&format!("CHALLENGE {NONCE}")).await;
+    expect_error(&mut l, "not allowed in this state").await;
+}
+
+// 22
+#[tokio::test]
+async fn challenge_after_link_refused() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let mut l = FakeLink::connect(srv.local_addr).await;
+    l.handshake(LINK_A, TOKEN).await;
+    l.send(&format!("CHALLENGE {NONCE}")).await;
+    expect_error(&mut l, "not allowed in this state").await;
+}
+
+// 23
+#[tokio::test]
+async fn challenge_malformed_nonce() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    for nonce in [
+        "abc",
+        "00112233445566778899AABBCCDDEEFF00112233445566778899aabbccddeeff",
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeefg",
+    ] {
+        let mut l = FakeLink::connect(srv.local_addr).await;
+        l.send(&format!("CHALLENGE {nonce}")).await;
+        expect_error(&mut l, "malformed CHALLENGE").await;
+    }
+    let mut l = FakeLink::connect(srv.local_addr).await;
+    l.send("CHALLENGE").await;
+    expect_error(&mut l, "malformed CHALLENGE").await;
+}

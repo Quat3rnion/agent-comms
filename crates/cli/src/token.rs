@@ -56,15 +56,27 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
-/// Set the credential with this name to the hash of `token`.
+/// Server key of a link token (link protocol CHALLENGE): lowercase hex of
+/// HMAC-SHA256(key = token bytes, message = "agent-comms server key v1").
+pub fn server_key(token: &str) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(token.as_bytes())
+        .expect("HMAC accepts keys of any length");
+    mac.update(b"agent-comms server key v1");
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Set the credential with this name to the hash and server key of `token`.
 /// An existing credential of that name is replaced and un-revoked.
 pub fn upsert_link(secrets: &mut Secrets, name: &str, token: &str) -> Result<()> {
     let token_hash = hash_secret(token)?;
     let created = now_unix();
+    let key = server_key(token);
     if let Some(existing) = secrets.links.iter_mut().find(|l| l.name == name) {
         existing.token_hash = token_hash;
         existing.created = created;
         existing.revoked = false;
+        existing.server_key = Some(key);
     } else {
         secrets.links.push(LinkCredential {
             name: name.to_string(),
@@ -72,9 +84,32 @@ pub fn upsert_link(secrets: &mut Secrets, name: &str, token: &str) -> Result<()>
             token_hash,
             created,
             revoked: false,
+            server_key: Some(key),
         });
     }
     Ok(())
+}
+
+/// Add the server key to the credential with this name when it has none and
+/// `token` matches its hash. Returns true when the credential changed.
+pub fn backfill_server_key(secrets: &mut Secrets, name: &str, token: &str) -> bool {
+    use argon2::{PasswordHash, PasswordVerifier};
+    let Some(cred) = secrets
+        .links
+        .iter_mut()
+        .find(|l| l.name == name && !l.revoked && l.server_key.is_none())
+    else {
+        return false;
+    };
+    let matches = PasswordHash::new(&cred.token_hash).is_ok_and(|hash| {
+        Argon2::default()
+            .verify_password(token.as_bytes(), &hash)
+            .is_ok()
+    });
+    if matches {
+        cred.server_key = Some(server_key(token));
+    }
+    matches
 }
 
 /// Set the operator password hash. Keeps an existing account name.

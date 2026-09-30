@@ -52,6 +52,24 @@ describe("parseOptions", () => {
     expect(options.editActions).toEqual(["edit"])
   })
 
+  test("server identity options", () => {
+    expect(DEFAULT_OPTIONS.serverName).toBe("irc.agent-comms.local")
+    expect(DEFAULT_OPTIONS.requireServerProof).toBe(true)
+
+    const ok = parseOptions({ serverName: "irc.example", requireServerProof: false })
+    expect(ok.warnings).toEqual([])
+    expect(ok.options.serverName).toBe("irc.example")
+    expect(ok.options.requireServerProof).toBe(false)
+
+    const bad = parseOptions({ serverName: " ", requireServerProof: "no" })
+    expect(bad.options.serverName).toBe("irc.agent-comms.local")
+    expect(bad.options.requireServerProof).toBe(true)
+    expect(bad.warnings).toEqual([
+      'option "requireServerProof" must be a boolean; using default',
+      'option "serverName" must be a non-empty string; using default',
+    ])
+  })
+
   test("invalid values fall back to defaults with warnings", () => {
     const { options, warnings } = parseOptions({
       enabled: "yes",

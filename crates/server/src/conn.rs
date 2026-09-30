@@ -181,7 +181,7 @@ pub async fn run_client(state: SharedState, mut conn: LineConn) {
         };
     if let Ok(line) = &first {
         if let Ok(msg) = Message::parse_with(line, Limits::LINK) {
-            if msg.command_upper() == "LINK" {
+            if matches!(msg.command_upper().as_str(), "LINK" | "CHALLENGE") {
                 let mut conn = conn;
                 for module in &state.modules {
                     match module.take_link(state.clone(), conn, msg.clone()) {

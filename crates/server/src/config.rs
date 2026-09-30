@@ -57,6 +57,14 @@ pub struct LimitsConfig {
     pub outbound_queue: usize,
     /// Failed link handshakes allowed for each source address in one minute.
     pub link_auth_failures_per_min: u32,
+    /// Flood control for SEND on one link: token bucket size (inner lines).
+    pub link_flood_burst: u32,
+    /// Flood control for SEND on one link: tokens added each second.
+    pub link_flood_rate_per_sec: u32,
+    /// Flood control for SEND by one account: token bucket size (messages).
+    pub account_flood_burst: u32,
+    /// Flood control for SEND by one account: tokens added each second.
+    pub account_flood_rate_per_sec: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -104,6 +112,10 @@ impl Default for LimitsConfig {
             nick_max_len: 96,
             outbound_queue: 4096,
             link_auth_failures_per_min: 5,
+            link_flood_burst: 5000,
+            link_flood_rate_per_sec: 1000,
+            account_flood_burst: 100,
+            account_flood_rate_per_sec: 20,
         }
     }
 }
@@ -199,6 +211,11 @@ pub struct LinkCredential {
     pub created: i64,
     #[serde(default)]
     pub revoked: bool,
+    /// Key that proves the server identity to a link (link protocol CHALLENGE):
+    /// hex of HMAC-SHA256(token, "agent-comms server key v1"). It cannot be
+    /// used to authenticate as a link.
+    #[serde(default)]
+    pub server_key: Option<String>,
 }
 
 impl Secrets {

@@ -1,5 +1,6 @@
+import { createHmac } from "node:crypto"
 import { afterEach, describe, expect, test } from "bun:test"
-import { LinkClient, backoffDelay } from "../src/link.ts"
+import { LinkClient, backoffDelay, deriveServerKey, serverProof } from "../src/link.ts"
 import type { ConnectFn, LinkConn, LinkClientOptions, LogLevel } from "../src/link.ts"
 import type { IrcMessage } from "../src/proto.ts"
 import { getTag, msg, parseLine } from "../src/proto.ts"
@@ -128,6 +129,7 @@ function makeClient(
       logs.push(extra === undefined ? { level, msg: m } : { level, msg: m, extra })
     },
     connect: server.connect,
+    requireServerProof: false,
     ...over,
   })
   clients.push(link)
@@ -640,5 +642,81 @@ describe("reconnect and keepalive", () => {
     link.on("down", () => (downs += 1))
     await waitFor(() => downs >= 1, 1000)
     expect(downs).toBeGreaterThanOrEqual(1)
+  })
+})
+
+describe("server identity check (CHALLENGE / PROOF)", () => {
+  const SERVER = "irc.test"
+
+  function proofFor(nonce: string, token = TOKEN, name = SERVER): string {
+    const key = createHmac("sha256", token).update("agent-comms server key v1").digest()
+    return createHmac("sha256", key).update(`agent-comms link proof v1|${nonce}|${name}`).digest("hex")
+  }
+
+  test("server key and proof formulas", () => {
+    const nonce = "ab".repeat(32)
+    expect(deriveServerKey(TOKEN)).toBe(
+      createHmac("sha256", TOKEN).update("agent-comms server key v1").digest("hex"),
+    )
+    expect(serverProof(deriveServerKey(TOKEN), nonce, SERVER)).toBe(proofFor(nonce))
+  })
+
+  test("correct PROOF: LINK follows CHALLENGE and the link is established", async () => {
+    const server = new FakeServer()
+    server.on("CHALLENGE", (m, _raw, conn) => {
+      conn.push(`PROOF ${"0".repeat(64)} ${proofFor(m.params[0] ?? "")}`)
+    })
+    const { link } = makeClient(server, { requireServerProof: true, serverName: SERVER })
+    await establish(link)
+    const first = server.lines[0] ?? ""
+    expect(first).toMatch(/^CHALLENGE [0-9a-f]{64}$/)
+    expect(server.lines[1]).toBe(`LINK 1 svc-a.prj-b ${TOKEN}`)
+  })
+
+  test("wrong PROOF: LINK never sent, token never written, reconnect scheduled", async () => {
+    const server = new FakeServer()
+    server.on("CHALLENGE", (m, _raw, conn) => {
+      conn.push(`PROOF ${proofFor(m.params[0] ?? "", "other-token")}`)
+    })
+    const { link, logs } = makeClient(server, { requireServerProof: true, serverName: SERVER })
+    await link.start()
+    await waitFor(() => server.attempts >= 2)
+    expect(server.lines.some((l) => l.startsWith("LINK"))).toBe(false)
+    expect(server.lines.some((l) => l.includes(TOKEN))).toBe(false)
+    expect(server.lines.every((l) => l.startsWith("CHALLENGE "))).toBe(true)
+    expect(server.conns[0]?.closed).toBe(true)
+    expect(link.connected).toBe(false)
+    expect(logs.some((e) => e.level === "warn" && e.msg.includes("server identity check failed"))).toBe(true)
+  })
+
+  test("PROOF for another server name is refused", async () => {
+    const server = new FakeServer()
+    server.on("CHALLENGE", (m, _raw, conn) => {
+      conn.push(`PROOF ${proofFor(m.params[0] ?? "", TOKEN, "irc.other")}`)
+    })
+    const { link } = makeClient(server, { requireServerProof: true, serverName: SERVER })
+    await link.start()
+    await waitFor(() => server.attempts >= 2)
+    expect(server.lines.some((l) => l.includes(TOKEN))).toBe(false)
+  })
+
+  test("empty PROOF or a non-PROOF reply is refused", async () => {
+    for (const reply of ["PROOF", ":irc.test 451 * :You have not registered"]) {
+      const server = new FakeServer()
+      server.on("CHALLENGE", (_m, _raw, conn) => conn.push(reply))
+      const { link } = makeClient(server, { requireServerProof: true, serverName: SERVER })
+      await link.start()
+      await waitFor(() => server.attempts >= 2)
+      expect(server.lines.some((l) => l.includes(TOKEN))).toBe(false)
+      link.stop()
+    }
+  })
+
+  test("requireServerProof false: no CHALLENGE, LINK first", async () => {
+    const server = new FakeServer()
+    const { link } = makeClient(server, { requireServerProof: false })
+    await establish(link)
+    expect(server.lines[0]).toBe(`LINK 1 svc-a.prj-b ${TOKEN}`)
+    expect(server.lines.some((l) => l.startsWith("CHALLENGE"))).toBe(false)
   })
 })
