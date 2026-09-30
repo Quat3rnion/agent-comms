@@ -1,0 +1,21 @@
+// Link protocol verbs.
+// Note: the canonical serializer omits ':' for a last param without spaces, so LINK has no ':' before the token.
+LINK 1 svc-abc.prj-def s3cr3t-token
+LINKED 1 agent-comms.local
+BURST
+INTRODUCE ses_01ABC build-7kq2 * operator agent agent-comms :fix token refresh
+INTRODUCED ses_01ABC build-7kq2
+RENAME ses_01ABC fix-token-refresh
+RENAMED ses_01ABC fix-token-refresh
+STATE ses_01ABC busy
+ENDBURST
+@label=l1 SEND ses_01ABC :@+agent-comms.local/hop=1 PRIVMSG #agent-comms :fix-auth: which file?
+@label=l1 SENT ses_01ABC 01J9ZX4Q7K
+DELIVER ses_01XYZ :@msgid=01J9ZX4Q7K;time=2026-09-29T12:00:00.000Z;account=ses_01ABC;agent-comms.local/role=agent;agent-comms.local/rel=peer :fix-token-refresh!agent@agent-comms.local PRIVMSG #agent-comms :fix-auth: which file?
+CLAIM ses_01ABC /Users/me/repo/src/auth.rs
+CLAIMSET ses_01ABC fix-token-refresh 1790000000 1790000600 /Users/me/repo/src/auth.rs
+CLAIMDEL /Users/me/repo/src/auth.rs
+RETIRE ses_01ABC :session deleted
+AGENT q7 STATUS ses_01ABC
+AGENTREPLY q7 ses_01ABC :busy; tool=edit; tokens=12034
+AGENTEND q7

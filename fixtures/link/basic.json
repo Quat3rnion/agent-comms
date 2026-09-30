@@ -1,0 +1,18 @@
+[
+  {"tags": [], "source": null, "command": "PRIVMSG", "params": ["#chan", "hello world"]},
+  {"tags": [], "source": "nick!user@host", "command": "PRIVMSG", "params": ["#chan", "hello world"]},
+  {"tags": [], "source": "srv", "command": "001", "params": ["nick", "Welcome to the network, nick"]},
+  {"tags": [], "source": "srv", "command": "005", "params": ["nick", "CASEMAPPING=ascii", "CHANTYPES=#", "are supported by this server"]},
+  {"tags": [], "source": "srv", "command": "353", "params": ["nick", "=", "#lobby", "alice @bob +carol"]},
+  {"tags": [], "source": "srv", "command": "433", "params": ["*", "nick", "Nickname is already in use"]},
+  {"tags": [], "source": null, "command": "PING", "params": ["srv"]},
+  {"tags": [], "source": null, "command": "PONG", "params": ["srv"]},
+  {"tags": [], "source": null, "command": "QUIT", "params": []},
+  {"tags": [], "source": "nick!user@host", "command": "QUIT", "params": ["Gone to lunch"]},
+  {"tags": [], "source": null, "command": "PRIVMSG", "params": ["#c", ""]},
+  {"tags": [], "source": null, "command": "PRIVMSG", "params": ["#c", ":)"]},
+  {"tags": [], "source": null, "command": "PRIVMSG", "params": ["#c", "a  b   c"]},
+  {"tags": [], "source": null, "command": "JOIN", "params": ["#lobby"]},
+  {"tags": [], "source": "nick!user@host", "command": "JOIN", "params": ["#lobby"]},
+  {"tags": [], "source": null, "command": "NICK", "params": ["newnick"]}
+]

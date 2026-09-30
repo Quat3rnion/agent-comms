@@ -1,0 +1,17 @@
+// Basic IRC lines in canonical form.
+PRIVMSG #chan :hello world
+:nick!user@host PRIVMSG #chan :hello world
+:srv 001 nick :Welcome to the network, nick
+:srv 005 nick CASEMAPPING=ascii CHANTYPES=# :are supported by this server
+:srv 353 nick = #lobby :alice @bob +carol
+:srv 433 * nick :Nickname is already in use
+PING srv
+PONG srv
+QUIT
+:nick!user@host QUIT :Gone to lunch
+PRIVMSG #c :
+PRIVMSG #c ::)
+PRIVMSG #c :a  b   c
+JOIN #lobby
+:nick!user@host JOIN #lobby
+NICK newnick

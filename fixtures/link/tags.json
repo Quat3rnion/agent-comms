@@ -1,0 +1,16 @@
+[
+  {"tags": [["time", "2026-09-29T12:00:00.000Z"]], "source": "nick!user@host", "command": "PRIVMSG", "params": ["#c", "hi"]},
+  {"tags": [["msgid", "abc123"], ["account", "alice"]], "source": "alice!a@host", "command": "PRIVMSG", "params": ["#c", "hi there"]},
+  {"tags": [["label", "l1"]], "source": null, "command": "PING", "params": ["srv"]},
+  {"tags": [["+draft/reply", "abc123"], ["+typing", "active"]], "source": null, "command": "TAGMSG", "params": ["#c"]},
+  {"tags": [["+agent-comms.local/hop", "2"]], "source": null, "command": "PRIVMSG", "params": ["#c", "hop test"]},
+  {"tags": [["agent-comms.local/role", "operator"]], "source": "op!o@host", "command": "PRIVMSG", "params": ["#c", "hi"]},
+  {"tags": [["+empty", null], ["flag", null]], "source": null, "command": "PING", "params": ["srv"]},
+  {"tags": [["semi", "a;b"]], "source": null, "command": "PRIVMSG", "params": ["#c", "semicolon"]},
+  {"tags": [["space", "a b"]], "source": null, "command": "PRIVMSG", "params": ["#c", "space"]},
+  {"tags": [["backslash", "a\\b"]], "source": null, "command": "PRIVMSG", "params": ["#c", "backslash"]},
+  {"tags": [["cr", "a\rb"]], "source": null, "command": "PRIVMSG", "params": ["#c", "carriage return"]},
+  {"tags": [["lf", "a\nb"]], "source": null, "command": "PRIVMSG", "params": ["#c", "line feed"]},
+  {"tags": [["all", "x;y z\\w\r\n"]], "source": null, "command": "PING", "params": ["srv"]},
+  {"tags": [["first", "1"], ["second", "two words"], ["third", null]], "source": "srv", "command": "NOTICE", "params": ["*", "ordered tags"]}
+]

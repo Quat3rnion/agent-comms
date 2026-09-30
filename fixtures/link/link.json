@@ -1,0 +1,21 @@
+[
+  {"tags": [], "source": null, "command": "LINK", "params": ["1", "svc-abc.prj-def", "s3cr3t-token"]},
+  {"tags": [], "source": null, "command": "LINKED", "params": ["1", "agent-comms.local"]},
+  {"tags": [], "source": null, "command": "BURST", "params": []},
+  {"tags": [], "source": null, "command": "INTRODUCE", "params": ["ses_01ABC", "build-7kq2", "*", "operator", "agent", "agent-comms", "fix token refresh"]},
+  {"tags": [], "source": null, "command": "INTRODUCED", "params": ["ses_01ABC", "build-7kq2"]},
+  {"tags": [], "source": null, "command": "RENAME", "params": ["ses_01ABC", "fix-token-refresh"]},
+  {"tags": [], "source": null, "command": "RENAMED", "params": ["ses_01ABC", "fix-token-refresh"]},
+  {"tags": [], "source": null, "command": "STATE", "params": ["ses_01ABC", "busy"]},
+  {"tags": [], "source": null, "command": "ENDBURST", "params": []},
+  {"tags": [["label", "l1"]], "source": null, "command": "SEND", "params": ["ses_01ABC", "@+agent-comms.local/hop=1 PRIVMSG #agent-comms :fix-auth: which file?"]},
+  {"tags": [["label", "l1"]], "source": null, "command": "SENT", "params": ["ses_01ABC", "01J9ZX4Q7K"]},
+  {"tags": [], "source": null, "command": "DELIVER", "params": ["ses_01XYZ", "@msgid=01J9ZX4Q7K;time=2026-09-29T12:00:00.000Z;account=ses_01ABC;agent-comms.local/role=agent;agent-comms.local/rel=peer :fix-token-refresh!agent@agent-comms.local PRIVMSG #agent-comms :fix-auth: which file?"]},
+  {"tags": [], "source": null, "command": "CLAIM", "params": ["ses_01ABC", "/Users/me/repo/src/auth.rs"]},
+  {"tags": [], "source": null, "command": "CLAIMSET", "params": ["ses_01ABC", "fix-token-refresh", "1790000000", "1790000600", "/Users/me/repo/src/auth.rs"]},
+  {"tags": [], "source": null, "command": "CLAIMDEL", "params": ["/Users/me/repo/src/auth.rs"]},
+  {"tags": [], "source": null, "command": "RETIRE", "params": ["ses_01ABC", "session deleted"]},
+  {"tags": [], "source": null, "command": "AGENT", "params": ["q7", "STATUS", "ses_01ABC"]},
+  {"tags": [], "source": null, "command": "AGENTREPLY", "params": ["q7", "ses_01ABC", "busy; tool=edit; tokens=12034"]},
+  {"tags": [], "source": null, "command": "AGENTEND", "params": ["q7"]}
+]

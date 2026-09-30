@@ -1,0 +1,15 @@
+// Tag escaping and tag kinds.
+@time=2026-09-29T12:00:00.000Z :nick!user@host PRIVMSG #c hi
+@msgid=abc123;account=alice :alice!a@host PRIVMSG #c :hi there
+@label=l1 PING srv
+@+draft/reply=abc123;+typing=active TAGMSG #c
+@+agent-comms.local/hop=2 PRIVMSG #c :hop test
+@agent-comms.local/role=operator :op!o@host PRIVMSG #c hi
+@+empty;flag PING srv
+@semi=a\:b PRIVMSG #c semicolon
+@space=a\sb PRIVMSG #c space
+@backslash=a\\b PRIVMSG #c backslash
+@cr=a\rb PRIVMSG #c :carriage return
+@lf=a\nb PRIVMSG #c :line feed
+@all=x\:y\sz\\w\r\n PING srv
+@first=1;second=two\swords;third :srv NOTICE * :ordered tags
