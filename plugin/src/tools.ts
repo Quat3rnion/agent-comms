@@ -604,7 +604,7 @@ export async function registerTools(
         name: tool.name,
         description: tool.description,
         input: tool.input,
-        options: { namespace: NAMESPACE },
+        options: { namespace: NAMESPACE, codemode: false },
         execute: async (input, context) => {
           const result = await tool.execute(input, { sessionID: context.sessionID, signal: context.signal })
           return { content: result.content }

@@ -178,7 +178,6 @@ export async function startOpencode(options: StartOpencodeOptions): Promise<Test
     model: `${PROVIDER_ID}/${MODEL_ID}`,
     snapshots: false,
     update: "disable",
-    plugins: [{ package: PLUGIN_DIR, options: pluginOptions }],
     providers: {
       [PROVIDER_ID]: {
         name: "E2E Mock",
@@ -201,13 +200,30 @@ export async function startOpencode(options: StartOpencodeOptions): Promise<Test
   // Dynamic import: the SDK must load after `isolate()` set the environment.
   const { OpenCode: OpenCodeRuntime } = await import("@opencode/sdk")
   const logs: OpencodeLog[] = []
+  // The embedded host does not load `plugins` entries from config. Pass the
+  // plugin object directly and inject the options that config would give.
+  const pluginModule = (await import(join(PLUGIN_DIR, "src", "index.ts"))) as {
+    default: { setup: (ctx: object) => unknown } & Record<string, unknown>
+  }
+  const base = pluginModule.default
+  const plugin = {
+    ...base,
+    setup: (ctx: object) =>
+      base.setup(
+        new Proxy(ctx, {
+          get: (target, prop, receiver) =>
+            prop === "options" ? pluginOptions : Reflect.get(target, prop, receiver),
+        }),
+      ),
+  }
   const sdk = await OpenCodeRuntime.create({
+    plugins: [plugin as never],
     config: { content: JSON.stringify(config), directory: configDir, project: false },
     database: { path: join(rootDir, "opencode.db") },
     models: { fetch: false },
     fs: { filewatcher: false, fff: false },
     log: {
-      level: "info",
+      level: (process.env["E2E_LOG_LEVEL"] as "info" | "debug" | undefined) ?? "info",
       emit: (entry) => {
         const item: OpencodeLog = { level: entry.level, message: entry.message }
         if (entry.attributes !== undefined) item.attributes = entry.attributes
