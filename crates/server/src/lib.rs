@@ -1,12 +1,15 @@
 //! agent-comms IRC server: core and modules.
 
+pub mod caps;
 pub mod channel;
 pub mod config;
 pub mod conn;
 pub mod flood;
 pub mod handlers;
 pub mod module;
+pub mod modules;
 pub mod ops;
+pub mod sasl;
 pub mod server;
 pub mod state;
 pub mod store;

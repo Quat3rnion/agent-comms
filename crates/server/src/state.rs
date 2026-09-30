@@ -3,7 +3,7 @@
 use crate::channel::Channel;
 use crate::config::{Config, Secrets};
 use crate::module::{Cx, Module};
-use crate::user::{LinkHandle, Role, Sink, User, UserId};
+use crate::user::{LinkHandle, RegState, Role, Sink, User, UserId};
 use crate::util::{fold, now_ms, unix_now};
 use agent_comms_proto::Message;
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -245,6 +245,11 @@ impl World {
             signon: unix_now(),
             label: None,
             label_buf: None,
+            reg: RegState {
+                nick_set: true,
+                user_set: true,
+                ..RegState::default()
+            },
         };
         self.accounts.insert(fold(account), id);
         self.add_user(user);

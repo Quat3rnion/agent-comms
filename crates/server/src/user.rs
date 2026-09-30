@@ -135,6 +135,27 @@ pub const VIRTUAL_CAPS: &[&str] = &[
     "draft/event-playback",
 ];
 
+/// SASL exchange that runs now.
+#[derive(Clone, Debug, Default)]
+pub struct SaslState {
+    /// Mechanism name (uppercase).
+    pub mechanism: String,
+    /// Base64 chunks received so far.
+    pub buffer: String,
+}
+
+/// Registration state of a connection.
+#[derive(Clone, Debug, Default)]
+pub struct RegState {
+    pub nick_set: bool,
+    pub user_set: bool,
+    /// True between `CAP LS`/`CAP REQ` and `CAP END`.
+    pub cap_negotiating: bool,
+    /// CAP version given in `CAP LS` (0 when not given).
+    pub cap_version: u32,
+    pub sasl: Option<SaslState>,
+}
+
 pub struct User {
     pub id: UserId,
     pub nick: String,
@@ -156,6 +177,7 @@ pub struct User {
     /// Label of the labeled command that runs now.
     pub label: Option<String>,
     pub label_buf: Option<Vec<Message>>,
+    pub reg: RegState,
 }
 
 impl User {
@@ -180,6 +202,7 @@ impl User {
             signon,
             label: None,
             label_buf: None,
+            reg: RegState::default(),
         }
     }
 
