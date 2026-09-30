@@ -1,0 +1,39 @@
+{
+  "name": "openchamber-agent-comms",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "See the agent-comms IRC network and talk to agents as the operator.",
+  "openchamber": {
+    "apiVersion": 1,
+    "contributes": {
+      "panel": {
+        "id": "agent-comms",
+        "name": "Agent Comms",
+        "icon": "chat-3-line",
+        "entry": "panel/index.html"
+      },
+      "page": true,
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host",
+        "permissions": {
+          "sockets": []
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "bun run build:panel && bun run build:service",
+    "build:panel": "bun build panel/main.ts --outfile panel/main.js --format=iife --target=browser --minify",
+    "build:service": "bun build service/main.ts --outfile service/main.js --format=esm --target=node",
+    "test": "bun test --timeout 60000",
+    "type-check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@openchamber/sdk": "^2.0.3",
+    "@types/bun": "latest",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}

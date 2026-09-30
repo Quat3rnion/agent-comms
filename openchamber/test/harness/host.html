@@ -1,0 +1,103 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Agent Comms panel harness</title>
+    <style>
+      html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; background: #111; color: #ddd; }
+      #bar { height: 28px; display: flex; gap: 10px; align-items: center; padding: 0 10px; font-size: 12px; background: #000; }
+      #frame { border: 0; display: block; margin: 0 auto; height: calc(100% - 28px); width: 100%; }
+      #toasts { position: fixed; right: 12px; bottom: 12px; display: flex; flex-direction: column; gap: 6px; z-index: 10; }
+      .toast { background: #333; padding: 8px 12px; border-radius: 8px; max-width: 360px; font-size: 12px; }
+      .toast.error { background: #6a1b1b; }
+    </style>
+  </head>
+  <body>
+    <div id="bar">
+      <b>Harness</b>
+      <span>badge: <b id="badge">-</b></span>
+      <span>width: <input id="w" type="number" value="1000" style="width:60px" /></span>
+      <label><input id="light" type="checkbox" /> light</label>
+    </div>
+    <iframe id="frame" src="/panel/index.html"></iframe>
+    <div id="toasts"></div>
+    <script>
+      const frame = document.getElementById('frame');
+      const dark = {
+        background: '#151313', elevated: '#1c1a1a', foreground: '#e8e4e1', muted: '#9a928c', subtle: '#2a2726', border: '#3a3634',
+        hover: '#262322', selection: '#33302e', focus: '#e0a060', primary: '#e8a04a', mutedSurface: '#211f1e', elevatedForeground: '#e8e4e1',
+        active: '#2f2b29', selectionForeground: '#ffffff', primaryForeground: '#1a1208', primaryText: '#f0b060', successText: '#7fd68b',
+        warningText: '#e8c060', errorText: '#f08080', infoText: '#80b0f0', success: '#4caf60', warning: '#d9a530', error: '#e05555', info: '#5090e0',
+        font: 'system-ui, sans-serif', mono: 'ui-monospace, monospace', radius: '10px',
+      };
+      const light = {
+        ...dark, background: '#ffffff', elevated: '#f6f4f2', foreground: '#1d1a17', muted: '#6d655f', subtle: '#eeeae6', border: '#d8d2cc',
+        hover: '#efebe7', selection: '#e4ded8', mutedSurface: '#f1eeeb', elevatedForeground: '#1d1a17', active: '#e0dad4',
+        selectionForeground: '#000', primaryText: '#a25b0c', successText: '#22753a', warningText: '#8a6100', errorText: '#b3261e', infoText: '#1f5fbf',
+      };
+      const envelope = { channel: 'openchamber.sdk', v: 1 };
+      const send = (msg) => frame.contentWindow.postMessage({ ...envelope, ...msg }, '*');
+      const ready = () => {
+        const isLight = document.getElementById('light').checked;
+        send({ type: 'ready', payload: {
+          theme: { mode: isLight ? 'light' : 'dark', tokens: isLight ? light : dark },
+          locale: 'en', directory: null, session: null, surface: 'page',
+          connection: { connected: false, account: '' }, settings: {}, item: null } });
+      };
+      const toast = (kind, message) => {
+        const node = document.createElement('div');
+        node.className = 'toast ' + kind;
+        node.textContent = message;
+        document.getElementById('toasts').append(node);
+        setTimeout(() => node.remove(), 6000);
+      };
+      const store = JSON.parse(localStorage.getItem('harness-storage') || '{}');
+      window.addEventListener('message', async (event) => {
+        if (event.source !== frame.contentWindow) return;
+        const m = event.data;
+        if (!m || m.channel !== 'openchamber.sdk') return;
+        const ok = (payload) => send({ type: 'result', id: m.id, ok: true, payload });
+        if (m.type === 'hello') return ready();
+        if (m.type === 'service-request') {
+          try {
+            const r = await fetch('/svc', { method: 'POST', body: JSON.stringify(m.payload) });
+            return ok(await r.json());
+          } catch (e) {
+            return send({ type: 'result', id: m.id, ok: false, code: 'SERVICE_FAILED', error: String(e) });
+          }
+        }
+        if (m.type === 'storage') {
+          const p = m.payload;
+          if (p.op === 'get') return ok({ storage: true, op: 'get', found: p.key in store, value: store[p.key] });
+          if (p.op === 'set') { store[p.key] = p.value; localStorage.setItem('harness-storage', JSON.stringify(store)); return ok({ storage: true, op: 'set' }); }
+          if (p.op === 'delete') { delete store[p.key]; return ok({ storage: true, op: 'delete' }); }
+          return ok({ storage: true, op: 'keys', keys: Object.keys(store) });
+        }
+        if (m.type === 'toast') { toast(m.payload.kind, m.payload.message); return ok(); }
+        if (m.type === 'badge') { document.getElementById('badge').textContent = String(m.payload.count); return ok(); }
+        return ok();
+      });
+      // Remote control for tests: run code inside the (same-origin) panel frame.
+      (async () => {
+        for (;;) {
+          try {
+            const job = await (await fetch('/ctl/next')).json();
+            if (!job) continue;
+            let value;
+            try {
+              // "TOP:" runs in the harness page, anything else runs in the panel frame.
+              value = job.code.startsWith('TOP:') ? String(await (0, eval)(job.code.slice(4))) : String(await frame.contentWindow.eval(job.code));
+            } catch (e) { value = 'ERR ' + e; }
+            await fetch('/ctl/result', { method: 'POST', body: JSON.stringify({ id: job.id, value }) });
+          } catch { await new Promise((r) => setTimeout(r, 500)); }
+        }
+      })();
+      document.getElementById('w').addEventListener('input', (e) => { frame.style.width = e.target.value + 'px'; });
+      document.getElementById('light').addEventListener('change', ready);
+      const params = new URLSearchParams(location.search);
+      if (params.get('w')) { document.getElementById('w').value = params.get('w'); frame.style.width = params.get('w') + 'px'; }
+      if (params.get('light')) { document.getElementById('light').checked = true; }
+      if (params.get('reset')) { localStorage.removeItem('harness-storage'); }
+    </script>
+  </body>
+</html>
