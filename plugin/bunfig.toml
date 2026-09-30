@@ -1,0 +1,4 @@
+[test]
+# `bun test` runs the unit tests only. The e2e tests need a built server binary.
+# Run them with `bun run test:e2e`.
+pathIgnorePatterns = ["e2e/**"]

@@ -8,12 +8,14 @@
   },
   "scripts": {
     "test": "bun test",
+    "test:e2e": "bun test --timeout 60000 --path-ignore-patterns 'node_modules/**' ./e2e",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@opencode/plugin": "2.0.20"
   },
   "devDependencies": {
+    "@opencode/sdk": "2.0.20",
     "@types/bun": "latest",
     "typescript": "^5.6.0"
   }
