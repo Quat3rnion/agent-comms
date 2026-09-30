@@ -233,6 +233,32 @@ describe("send", () => {
     expect(await h.run("read", {}, "off")).toBe("IRC is off for this session (use /irc on).")
   })
 
+  test("adopts a session that the registry does not know yet", async () => {
+    const link = new FakeLink()
+    const opts: Options = { ...DEFAULT_OPTIONS }
+    const late = record("late")
+    const asked: string[] = []
+    const tools = buildTools({
+      link,
+      inbox: new Inbox({ previewChars: 300 }),
+      registry: registryOf(record("s1")),
+      hop: new HopTracker(),
+      claims: new ClaimTracker(),
+      options: opts,
+      adopt: async (id) => {
+        asked.push(id)
+        return id === "late" ? late : undefined
+      },
+    })
+    const send = tools.find((t) => t.name === "send")
+    if (!send) throw new Error("no send tool")
+    const res = await send.execute({ target: "bob", text: "hi" }, { sessionID: "late" })
+    expect(asked).toEqual(["late"])
+    expect(res.content).not.toContain("IRC is off")
+    const off = await send.execute({ target: "bob", text: "hi" }, { sessionID: "stranger" })
+    expect(off.content).toBe("IRC is off for this session (use /irc on).")
+  })
+
   test("maps SENDFAIL codes", async () => {
     const h = harness()
     h.link.sendResult = { ok: false, code: "NOSUCHNICK", reason: "no such nick" }

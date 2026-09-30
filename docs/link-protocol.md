@@ -376,10 +376,11 @@ Delivery cursor rules:
   `CLAIMSET`, `CLAIMFAIL`, `CLAIMDEL`, and `FAIL`. For `CLAIMSET` and
   `CLAIMDEL`, only the copy that goes to the requesting link has the label.
   A label value uses only `[A-Za-z0-9_-]` and is 1 to 64 characters long.
-- **Ownership.** A link can act only for accounts that it introduced (section
-  11). For any other account the server replies with `FAIL <VERB>
-  UNKNOWN_ACCOUNT <account> :<description>`. The server MUST give this same
-  reply for an unknown account and for an account owned by another link.
+- **Attachment.** A link can act only for accounts that are attached to it
+  (it sent `INTRODUCE` for them, section 6.9). For any other account the
+  server replies with `FAIL <VERB> UNKNOWN_ACCOUNT <account> :<description>`.
+  The server MUST give this same reply for an unknown account and for an
+  account that is attached only to other links.
 - **Unknown tags.** A receiver MUST ignore tags that it does not know.
 - **Message tags from the server.** The server adds `time` and `msgid` to
   each message it delivers (section 7.3). `time` uses the format
@@ -417,8 +418,8 @@ INTRODUCED <account> <assigned-nick>
 
 Rules for a new account:
 
-- The server creates the account. Its owner link is the link that sent the
-  line.
+- The server creates the account. The link that sent the line is attached
+  to the account (section 6.9).
 - If another account uses the nick (as nick or alias), the server appends
   `-2`, then `-3`, and so on, until the nick is free. When the suffix makes
   the nick too long, the server cuts the base nick first.
@@ -436,19 +437,24 @@ Rules for a new account:
   account. The link can send `NAMES` with `SEND` when it needs the list. The
   server does send `JOIN` notifications for auto-joins to the other members.
 
-Rules for an existing account:
+Rules for an existing account. `INTRODUCE` of an existing account is
+idempotent. It is correct from each link that has the same owner:
 
-- If the account is owned by the same link (the link reconnects), the account
-  becomes active. The dormant AWAY state ends. The server treats the line as
-  an update of the nick (as `RENAME`), the realname, and the project. If the
-  project changes, the server parts the old project channel with the reason
-  `moved` and joins the new one.
-- The parent MUST NOT change. If it differs, the server replies `FAIL
-  INTRODUCE PARENT_MISMATCH`.
-- If the account is owned by another link, ownership moves to this link (the
-  session moved). The server sends `DISOWN <account>` to the old link. The
-  old link MUST stop acting for the account. The server does not send `QUIT`
-  or `JOIN` for a move.
+- The server attaches the link to the account (section 6.9). Other attached
+  links stay attached. The server does not send `DISOWN`, `QUIT`, or `JOIN`.
+- If the account was dormant, the dormant AWAY state ends.
+- The nick does not change. The server ignores the nick of the line. The
+  reply `INTRODUCED` has the current nick of the account. Use `RENAME` to
+  change the nick.
+- If the realname is not empty and is different, the server changes the
+  realname.
+- If the project changes, the server parts the old project channel with the
+  reason `moved` and joins the new one.
+- The parent does not change. If the parent of the line is different, the
+  server keeps the parent that it has (the first parent stays). This is not
+  a failure.
+- If the owner is different, the server replies `FAIL INTRODUCE
+  OWNER_MISMATCH`.
 
 Failures (the link stays open):
 
@@ -457,9 +463,8 @@ Failures (the link stays open):
 | `INVALID_ACCOUNT`             | The account ID has wrong characters or length              |
 | `ACCOUNT_OWNED_BY_OPERATOR`   | The account ID is an operator account (such as `operator`) |
 | `INVALID_ROLE`                | The role is not `agent`. Links cannot create operator accounts |
-| `OWNER_MISMATCH`              | The owner is not the owner of the link credential          |
+| `OWNER_MISMATCH`              | The owner is not the owner of the link credential, or the account has another owner |
 | `INVALID_PARENT`              | The parent account does not exist                          |
-| `PARENT_MISMATCH`             | The account exists with a different parent                 |
 | `INVALID_PROJECT`             | The project is not a valid slug                            |
 | `ERRONEUS_NICK`               | The nick breaks the nick rules                             |
 
@@ -540,9 +545,21 @@ The link sends:
 STATE <account> busy|idle
 ```
 
-- `idle`: the account is AWAY with the reason `idle`.
-- `busy`: the account is not away. The server also refreshes the claim
-  deadlines of the account (section 8.2).
+- `idle`: this link reports that the session is idle.
+- `busy`: this link reports that the session is busy. The server also
+  refreshes the claim deadlines of the account (section 8.2).
+
+The server keeps the last state from each attached link (section 6.9). The
+AWAY state of the account comes from all attached links together:
+
+- At least one attached link reports `busy`: the account is not away.
+- All attached links report `idle`: the account is AWAY with the reason
+  `idle`. A link that sent no `STATE` counts as `idle`.
+- No link is attached: the account is AWAY with the reason `dormant`
+  (section 6.8).
+
+The server sends an AWAY change (away-notify) only when this result changes.
+A `STATE` also changes the primary link of the account (section 6.9).
 
 The server sends no reply on success. On failure, the server sends `FAIL
 STATE UNKNOWN_ACCOUNT <account> :<description>` or `FAIL STATE INVALID_STATE
@@ -550,16 +567,73 @@ STATE UNKNOWN_ACCOUNT <account> :<description>` or `FAIL STATE INVALID_STATE
 
 ### 6.8 Dormant accounts and inactivity
 
-- When a link disconnects, its accounts stay in their channels (they are
-  always-on). Each account gets AWAY `dormant`.
+- When a link disconnects, the server detaches it from all its accounts.
+- An account that has other attached links stays present. It does not get
+  AWAY `dormant`. Its deliveries go to the new primary link (section 6.9).
+  The server does not replay, because the delivery cursor is for each
+  account.
+- An account without attached links stays in its channels (it is always-on).
+  It gets AWAY `dormant`.
 - The server stores messages for a dormant account. The server replays them
-  when the link reconnects (section 4.3).
+  to the first link that attaches to the account again (section 4.3).
 - Claims of a dormant account stay until they expire.
 - The server retires an account that has been inactive for 30 days. Activity
   is any `INTRODUCE`, `STATE`, `SEND`, or `CLAIM` for the account.
-- When the server retires an account, it does the steps of section 6.6. If the
-  owner link is connected, the server also sends `RETIRED <account>
-  inactive`.
+- When the server retires an account, it does the steps of section 6.6. The
+  server also sends `RETIRED <account> inactive` to each attached link. If no
+  link is attached, it sends the line to the link that attached to the
+  account last, when that link is connected.
+
+### 6.9 Shared accounts
+
+More than one link can attach to one account at the same time. Example: two
+opencode processes on one computer use the same session database. Each
+process opens its own link (with its own link name), and each process
+introduces the same sessions.
+
+Attach:
+
+- A link attaches to an account when it sends `INTRODUCE` for the account
+  (section 6.1). All links of the same owner can attach.
+- For each attached link, the server keeps: the link name, the last `STATE`
+  (`busy` or `idle`), the time of the last `STATE busy`, and the time of the
+  attach.
+- A link detaches when it disconnects, or when the account retires.
+- The server stores only the name of the link that attached last. The server
+  uses it only after a server restart, when the accounts are dormant.
+
+Authority:
+
+- A link can act for an account (`SEND`, `STATE`, `RENAME`, `RETIRE`,
+  `CLAIM`, `RELEASE`, `AGENTREPLY`) only while it is attached to the account.
+  During its burst, a link is attached to the accounts that it introduced in
+  that burst.
+- A link that did not introduce the account gets `FAIL <VERB>
+  UNKNOWN_ACCOUNT`.
+- `RETIRE` from one attached link retires the account for all links. The
+  server sends `RETIRED <account>` to each attached link.
+
+Presence: see section 6.7.
+
+Primary link:
+
+- The server sends the deliveries of the account (`DELIVER` lines, section
+  7.3, and `AGENT` requests, section 9) to one attached link only: the
+  primary link.
+- The primary link is the attached link that reported `busy` most recently.
+  A link that reports `busy` now comes before a link that reports `idle` now.
+  When no link reported `busy`, the primary link is the link that attached
+  first.
+- A link becomes a possible primary link only after its server burst.
+- The primary link changes after `STATE`, attach, and detach.
+- Lines for all links (`CLAIMSET`, `CLAIMDEL`) do not change. The server
+  sends them to all links.
+
+Replay:
+
+- In the server burst of a link, the server replays the messages of an
+  account only when no other link that finished its burst is attached to the
+  account. Otherwise, the other link already got the messages.
 
 ## 7. Messages
 
@@ -644,6 +718,11 @@ The server sends:
 ```
 DELIVER <account> :<inner server line>
 ```
+
+The server sends each `DELIVER` line for an account to one link only: the
+primary link of the account (section 6.9). When more than one link is
+attached to the account, the other links do not get the line. The delivery
+cursor is for each account, so the server delivers a message one time.
 
 The inner line is exactly the line that an ordinary client would receive.
 That client is logged in as the account and has these capabilities enabled:
@@ -878,7 +957,8 @@ AGENT RESUME <nick>
 
 ### 9.2 Server to link
 
-The server routes each request to the link that owns the account:
+The server routes each request to the primary link of the account (section
+6.9). Only that link gets the request:
 
 ```
 AGENT <request-id> <STATUS|INTERRUPT|RESUME> <account>
@@ -918,8 +998,11 @@ NOTICE <operator-nick> :end of AGENT <verb>
 
 Special cases:
 
-- The link of the account is offline: the server replies itself with
+- No link is attached to the account: the server replies itself with
   `[<nick>] dormant (link offline)`.
+- The primary link disconnects before its `AGENTEND`: the server replies
+  itself with `[<nick>] dormant (link offline)` for the request. The server
+  does not send the request again to another attached link.
 - A request gets no `AGENTEND` in 10 seconds: the server sends
   `[<nick>] no reply` for it and treats it as complete.
 
@@ -986,8 +1069,8 @@ after `LINKED`. The link SHOULD ignore an unknown command from the server
 - The server limits failed handshakes to 5 per minute for each source
   address. The server closes a connection over the limit with `ERROR :rate
   limited`, and it does not check the credential.
-- A link can act only for accounts that it introduced. The server checks the
-  ownership on every `SEND`, `RENAME`, `RETIRE`, `STATE`, `CLAIM`, and
+- A link can act only for accounts that are attached to it. The server checks
+  the attachment on every `SEND`, `RENAME`, `RETIRE`, `STATE`, `CLAIM`, and
   `RELEASE`.
 - The role on `INTRODUCE` MUST be `agent`. A link cannot create an operator
   account. A link cannot take an account of the operator (`FAIL INTRODUCE
@@ -1038,7 +1121,7 @@ both directions. All lines can carry a `label` tag (section 5).
 | `ENDBURST`    | S<>L  | `ENDBURST`                                                                              | none (the server burst follows the link `ENDBURST`)  |
 | `INTRODUCE`   | L>S   | `INTRODUCE <account> <nick> <parent\|*> <owner> <role> <project> :<realname>`           | `INTRODUCED`, or `FAIL INTRODUCE`                    |
 | `INTRODUCED`  | S>L   | `INTRODUCED <account> <assigned-nick>`                                                  | none                                                 |
-| `DISOWN`      | S>L   | `DISOWN <account>`                                                                      | none                                                 |
+| `DISOWN`      | S>L   | `DISOWN <account>` (reserved; version 1 servers do not send it, links SHOULD handle it) | none                                                 |
 | `RENAME`      | L>S   | `RENAME <account> <new-nick>`                                                           | `RENAMED`, or `FAIL RENAME`                          |
 | `RENAMED`     | S>L   | `RENAMED <account> <assigned-nick>`                                                     | none                                                 |
 | `RETIRE`      | L>S   | `RETIRE <account> [:reason]`                                                            | `RETIRED`, or `FAIL RETIRE`                          |
@@ -1344,11 +1427,9 @@ credential arrives. The old connection gets:
 ERROR replaced
 ```
 
-A session moves to another link. The old link gets:
-
-```
-DISOWN ses_01DEF
-```
+A second link introduces an account that is already attached to another
+link. The server attaches the second link too and sends nothing to the first
+link (section 6.9).
 
 A subagent is introduced. Its nick is in use, so the server appends `-2`:
 

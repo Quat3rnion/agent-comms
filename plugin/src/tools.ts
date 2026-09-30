@@ -21,6 +21,8 @@ export interface ToolDeps {
   hop: HopTracker
   claims: ClaimTracker
   options: Options
+  /** Register a session that this instance has not seen yet. Returns undefined when it is not ours. */
+  adopt?: (sessionID: string) => Promise<SessionRecord | undefined>
   /** Called after a tool changed membership so the caller can refresh the session's channels. */
   onChannelsChanged?: (sessionID: string) => void
   /**
@@ -260,7 +262,9 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
       description,
       input,
       execute: async (raw, context) => {
-        const rec = registry.get(context.sessionID)
+        // A session that started before this plugin instance loaded is not in the
+        // registry yet: adopt it instead of reporting IRC as off.
+        const rec = registry.get(context.sessionID) ?? (await deps.adopt?.(context.sessionID))
         if (!rec || rec.optedOut) return { content: OFF }
         try {
           return { content: await handler(toArgs(raw), context, rec) }

@@ -640,25 +640,337 @@ async fn link_replaced() {
     );
 }
 
-// 15
+// 15: shared accounts (several links attached to one account).
+const INTRO_M: &str = "INTRODUCE ses_M mover * operator agent webapp :shared";
+
+fn is_away_of(m: &Message, nick: &str) -> bool {
+    m.command_upper() == "AWAY" && m.source_nick() == Some(nick)
+}
+
+/// The first client line that matches `pred` within `dur`, or `None`.
+async fn client_try_expect(
+    c: &mut common::TestClient,
+    dur: Duration,
+    pred: impl Fn(&Message) -> bool,
+) -> Option<Message> {
+    let deadline = tokio::time::Instant::now() + dur;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() {
+            return None;
+        }
+        match c.try_recv(left).await {
+            Some(m) if pred(&m) => return Some(m),
+            Some(_) => {}
+            None => return None,
+        }
+    }
+}
+
+/// Links `link-x` and `link-y`, both attached to `ses_M` (`mover`), and an
+/// operator in `#webapp`.
+async fn shared_pair(addr: std::net::SocketAddr) -> (FakeLink, FakeLink, common::TestClient) {
+    let mut op = operator(addr).await;
+    let (x, bx) = linked(addr, "link-x", &[INTRO_M]).await;
+    assert_eq!(introduced_nick(&bx, "ses_M"), "mover");
+    join_names(&mut op, "#webapp").await;
+    // A different nick in the second INTRODUCE does not rename the account.
+    let (y, by) = linked(
+        addr,
+        "link-y",
+        &["INTRODUCE ses_M other-nick * operator agent webapp :shared"],
+    )
+    .await;
+    assert_eq!(introduced_nick(&by, "ses_M"), "mover", "{}", dump(&by));
+    (x, y, op)
+}
+
+async fn dm_to_mover(op: &mut common::TestClient, text: &str) {
+    op.send(&format!("PRIVMSG mover :{text}")).await;
+    client_sync(op, "dm").await;
+}
+
 #[tokio::test]
-async fn ownership_move() {
+async fn shared_attach() {
     let dir = tmp();
     let srv = start(dir.path()).await;
-    let intro = "INTRODUCE ses_M mover * operator agent webapp :moving";
-    let (mut x, bx) = linked(srv.local_addr, "link-x", &[intro]).await;
-    assert_eq!(introduced_nick(&bx, "ses_M"), "mover");
-    let (mut y, by) = linked(srv.local_addr, "link-y", &[intro]).await;
-    assert_eq!(introduced_nick(&by, "ses_M"), "mover");
+    let (mut x, mut y, mut op) = shared_pair(srv.local_addr).await;
 
-    let m = x.expect_cmd("DISOWN").await;
+    // No DISOWN, no QUIT/JOIN/AWAY noise for the second INTRODUCE.
+    assert!(
+        x.try_expect(SHORT, |m| is_cmd(m, "DISOWN")).await.is_none(),
+        "DISOWN sent to the first link"
+    );
+    assert!(
+        client_try_expect(&mut op, SHORT, |m| m.source_nick() == Some("mover")
+            && matches!(
+                m.command_upper().as_str(),
+                "QUIT" | "JOIN" | "AWAY" | "NICK"
+            ))
+        .await
+        .is_none(),
+        "the second INTRODUCE changed the account"
+    );
+
+    // Both links can act for the account.
+    x.send("SEND ses_M :PRIVMSG #webapp :from x").await;
+    x.expect_cmd("SENT").await;
+    y.send("SEND ses_M :PRIVMSG #webapp :from y").await;
+    y.expect_cmd("SENT").await;
+
+    // Deliveries go to the link that reported busy last.
+    y.send("STATE ses_M busy").await;
+    y.sync().await;
+    dm_to_mover(&mut op, "to busy y").await;
+    y.expect(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "to busy y"))
+        .await;
+    assert!(
+        x.try_expect(SHORT, |m| is_deliver_msg(
+            m,
+            "ses_M",
+            "PRIVMSG",
+            "to busy y"
+        ))
+        .await
+        .is_none(),
+        "the DM went to both links"
+    );
+
+    // y goes away: the account stays present, x gets the deliveries.
+    drop(y);
+    let away = op.expect(|m| is_away_of(m, "mover")).await;
+    assert_eq!(away.param(0), Some("idle"), "{away:?}");
+    assert!(
+        client_try_expect(&mut op, SHORT, |m| is_away_of(m, "mover")
+            && m.param(0) == Some("dormant"))
+        .await
+        .is_none(),
+        "account went dormant with a link still attached"
+    );
+    dm_to_mover(&mut op, "to x").await;
+    x.expect(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "to x"))
+        .await;
+}
+
+#[tokio::test]
+async fn shared_parent_mismatch_attaches() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let (mut x, bx) = linked(
+        srv.local_addr,
+        "link-x",
+        &[
+            "INTRODUCE ses_P1 p-one * operator agent webapp :p1",
+            "INTRODUCE ses_P2 p-two * operator agent webapp :p2",
+            "INTRODUCE ses_K kid ses_P1 operator agent webapp :kid",
+        ],
+    )
+    .await;
+    assert_eq!(introduced_nick(&bx, "ses_K"), "kid");
+    let (mut y, by) = linked(
+        srv.local_addr,
+        "link-y",
+        &[
+            "INTRODUCE ses_P2 p-two * operator agent webapp :p2",
+            "INTRODUCE ses_K kid ses_P2 operator agent webapp :kid",
+            "INTRODUCE ses_P1 p-one ses_P2 operator agent webapp :p1",
+        ],
+    )
+    .await;
+    assert!(!by.iter().any(|m| is_cmd(m, "FAIL")), "{}", dump(&by));
+    assert_eq!(introduced_nick(&by, "ses_K"), "kid");
+    assert_eq!(introduced_nick(&by, "ses_P1"), "p-one");
+
+    for l in [&mut x, &mut y] {
+        l.send("STATE ses_K busy").await;
+        l.send("SEND ses_K :PRIVMSG #webapp :kid here").await;
+        l.expect_cmd("SENT").await;
+        l.sync().await;
+        assert!(
+            l.try_expect(SHORT, |m| is_cmd(m, "FAIL")).await.is_none(),
+            "[{}] {}",
+            l.name,
+            dump(&l.backlog)
+        );
+    }
+
+    // The first parent stays: ses_K is still in the family channel of p-one.
+    let mut op = operator(srv.local_addr).await;
+    let n = join_names(&mut op, "#p-one").await;
+    assert!(has_nick(&n, "kid"), "#p-one: {n:?}");
+}
+
+#[tokio::test]
+async fn shared_state_aggregate() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let (mut x, mut y, mut op) = shared_pair(srv.local_addr).await;
+
+    x.send("STATE ses_M busy").await;
+    let m = op.expect(|m| is_away_of(m, "mover")).await;
+    assert!(m.params.is_empty(), "busy must clear AWAY: {m:?}");
+
+    // The link that does not run the session reports idle: still busy.
+    y.send("STATE ses_M idle").await;
+    y.sync().await;
+    assert!(
+        client_try_expect(&mut op, SHORT, |m| is_away_of(m, "mover"))
+            .await
+            .is_none(),
+        "idle on one link overrode busy on the other"
+    );
+    op.send("WHOIS mover").await;
+    let m = op
+        .expect(|m| m.command == "301" || m.command == "318")
+        .await;
+    assert_eq!(m.command, "318", "mover is AWAY: {m:?}");
+
+    // All links idle: AWAY idle.
+    x.send("STATE ses_M idle").await;
+    let m = op.expect(|m| is_away_of(m, "mover")).await;
+    assert_eq!(m.param(0), Some("idle"));
+}
+
+#[tokio::test]
+async fn shared_delivery_to_last_busy() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let (mut x, mut y, mut op) = shared_pair(srv.local_addr).await;
+
+    y.send("STATE ses_M busy").await;
+    y.sync().await;
+    x.send("STATE ses_M idle").await;
+    x.sync().await;
+    dm_to_mover(&mut op, "for y only").await;
+    y.expect(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "for y only"))
+        .await;
+    assert!(
+        x.try_expect(SHORT, |m| is_deliver_msg(
+            m,
+            "ses_M",
+            "PRIVMSG",
+            "for y only"
+        ))
+        .await
+        .is_none(),
+        "the DM went to the idle link"
+    );
+
+    // x reports busy later: x becomes the primary link.
+    x.send("STATE ses_M busy").await;
+    x.sync().await;
+    dm_to_mover(&mut op, "for x now").await;
+    x.expect(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "for x now"))
+        .await;
+    assert!(y
+        .try_expect(SHORT, |m| is_deliver_msg(
+            m,
+            "ses_M",
+            "PRIVMSG",
+            "for x now"
+        ))
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn shared_detach_keeps_present() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let (x, mut y, mut op) = shared_pair(srv.local_addr).await;
+
+    drop(x);
+    assert!(
+        client_try_expect(&mut op, SHORT, |m| is_away_of(m, "mover")
+            && m.param(0) == Some("dormant"))
+        .await
+        .is_none(),
+        "account went dormant with a link still attached"
+    );
+    dm_to_mover(&mut op, "after x left").await;
+    y.expect(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "after x left"))
+        .await;
+    y.send("SEND ses_M :PRIVMSG #webapp :still here").await;
+    y.expect_cmd("SENT").await;
+}
+
+#[tokio::test]
+async fn shared_both_down_replay_once() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let (x, y, mut op) = shared_pair(srv.local_addr).await;
+
+    drop(x);
+    drop(y);
+    let m = op
+        .expect(|m| is_away_of(m, "mover") && m.param(0) == Some("dormant"))
+        .await;
+    assert_eq!(m.param(0), Some("dormant"));
+    dm_to_mover(&mut op, "while dormant").await;
+
+    let (mut x, bx) = linked(srv.local_addr, "link-x", &[INTRO_M]).await;
+    assert!(
+        bx.iter()
+            .any(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "while dormant")),
+        "no replay for the first link:\n{}",
+        dump(&bx)
+    );
+    let (mut y, by) = linked(srv.local_addr, "link-y", &[INTRO_M]).await;
+    assert!(
+        !by.iter()
+            .any(|m| is_cmd(m, "DELIVER") || is_cmd(m, "BATCH")),
+        "second link got a replay:\n{}",
+        dump(&by)
+    );
+    // x stays the primary link (earliest attached, nobody busy).
+    dm_to_mover(&mut op, "live again").await;
+    x.expect(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "live again"))
+        .await;
+    assert!(y
+        .try_expect(SHORT, |m| is_deliver_for(m, "ses_M"))
+        .await
+        .is_none());
+}
+
+#[tokio::test]
+async fn shared_authority_and_retire() {
+    let dir = tmp();
+    let mut cfg = link_config(dir.path());
+    cfg.limits.claim_idle_secs = 60;
+    let srv = start_cfg(cfg).await;
+    let (mut x, mut y, _op) = shared_pair(srv.local_addr).await;
+
+    // A link that never introduced the account cannot act for it.
+    let (mut z, _) = linked(srv.local_addr, "link-z", &[]).await;
+    for (line, verb) in [
+        ("CLAIM ses_M /tmp/shared.rs", "CLAIM"),
+        ("RELEASE ses_M /tmp/shared.rs", "RELEASE"),
+        ("STATE ses_M busy", "STATE"),
+        ("SEND ses_M :PRIVMSG #webapp :intruder", "SEND"),
+        ("RENAME ses_M intruder", "RENAME"),
+        ("RETIRE ses_M", "RETIRE"),
+    ] {
+        z.send(line).await;
+        let m = z.expect_cmd("FAIL").await;
+        assert_eq!(m.param(0), Some(verb), "{line}");
+        assert_eq!(m.param(1), Some("UNKNOWN_ACCOUNT"), "{line}");
+    }
+
+    // Both attached links can claim and release.
+    x.send("CLAIM ses_M /tmp/shared.rs").await;
+    x.expect(|m| is_cmd(m, "CLAIMSET")).await;
+    y.send("RELEASE ses_M /tmp/shared.rs").await;
+    y.expect(|m| is_cmd(m, "CLAIMDEL")).await;
+
+    // RETIRE from one attached link retires the account for all of them.
+    y.send("@label=r RETIRE ses_M").await;
+    let m = y.expect_cmd("RETIRED").await;
+    assert_eq!(m.tag("label"), Some("r"));
+    let m = x.expect_cmd("RETIRED").await;
     assert_eq!(m.param(0), Some("ses_M"));
-
-    x.send("SEND ses_M :PRIVMSG #webapp :old owner").await;
+    x.send("SEND ses_M :PRIVMSG #webapp :gone").await;
     let m = x.expect_cmd("FAIL").await;
     assert_eq!(m.param(1), Some("UNKNOWN_ACCOUNT"));
-    y.send("SEND ses_M :PRIVMSG #webapp :new owner").await;
-    y.expect_cmd("SENT").await;
 }
 
 // 16

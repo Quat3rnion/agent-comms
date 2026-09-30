@@ -782,6 +782,18 @@ describe("context hook", () => {
     expect(part.text).toContain("Unread: #lobby 1")
   })
 
+  test("a model call marks an idle session busy (missed execution events)", async () => {
+    const { rt, link, h } = await bootWithSession()
+    await rt.settle()
+    link.sent.length = 0
+    await h.hooks.context[0]?.({ sessionID: "ses_a", system: [] as unknown[] })
+    await rt.settle()
+    expect(byCommand(link.sent, "STATE")).toEqual([["ses_a", "busy"]])
+    await h.hooks.context[0]?.({ sessionID: "ses_a", system: [] as unknown[] })
+    await rt.settle()
+    expect(byCommand(link.sent, "STATE")).toHaveLength(1)
+  })
+
   test("adds the one-time join context once", async () => {
     const { rt, h } = await bootWithSession()
     rt.inbox.recordJoinContext("ses_a", "#dev", "topic", ["<bob> hi"])

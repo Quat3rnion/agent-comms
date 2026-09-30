@@ -7,7 +7,7 @@ use crate::modules::authority::relation;
 use crate::modules::history::render_stored;
 use crate::state::SharedState;
 use crate::store::{Store, StoredMessage};
-use crate::user::{Outbound, Role, Sink};
+use crate::user::{Outbound, Role};
 use crate::util::fold;
 use agent_comms_proto::{vendor_tag, Message};
 use std::collections::HashSet;
@@ -45,11 +45,20 @@ pub async fn server_burst(shared: &Arc<LinkShared>, state: &SharedState, ctx: &m
         .as_ref()
         .map(|o| o.account.clone());
 
+    let link_name = ctx.entry.name.clone();
     let mut seen = HashSet::new();
     let accounts: Vec<String> = ctx
         .accounts
         .iter()
         .filter(|a| seen.insert(fold(a)))
+        .filter(|a| shared.hub.is_attached(a, &link_name))
+        .cloned()
+        .collect();
+    // Replay only for accounts that no other live link serves: another live
+    // link already got the messages (the delivery cursor is per account).
+    let to_replay: Vec<String> = accounts
+        .iter()
+        .filter(|a| !shared.hub.has_other_live(a, &link_name))
         .cloned()
         .collect();
 
@@ -79,7 +88,10 @@ pub async fn server_burst(shared: &Arc<LinkShared>, state: &SharedState, ctx: &m
             // Lines replayed in this pass: an estimate of the lines that
             // arrive during the next pass.
             let mut replayed = 0;
-            for account in &accounts {
+            for account in &to_replay {
+                if shared.hub.has_other_live(account, &link_name) {
+                    continue;
+                }
                 let op = operator.as_deref();
                 match replay_account(state, store, &out, &mut batch, account, op, stall).await {
                     Some(n) => replayed += n,
@@ -93,9 +105,17 @@ pub async fn server_burst(shared: &Arc<LinkShared>, state: &SharedState, ctx: &m
         }
     }
 
+    let hub = shared.hub.clone();
     state.with_world(|cx| {
         if let Some(store) = &store {
-            replay_final(cx, store, ctx, &mut batch, &accounts, operator.as_deref());
+            // Check again under the world lock: another link can have gone
+            // down (or come up) during the replay passes.
+            let last: Vec<String> = accounts
+                .iter()
+                .filter(|a| !hub.has_other_live(a, &link_name))
+                .cloned()
+                .collect();
+            replay_final(cx, store, ctx, &mut batch, &last, operator.as_deref());
         }
         if batch.opened {
             ctx.send(&Message::new("BATCH", vec![format!("-{}", batch.id)]));
@@ -107,18 +127,8 @@ pub async fn server_burst(shared: &Arc<LinkShared>, state: &SharedState, ctx: &m
             let Some(uid) = cx.world.find_account(account) else {
                 continue;
             };
-            let dormant = match cx.world.user_mut(uid) {
-                Some(u) => {
-                    u.sink = Sink::Virtual {
-                        account: account.clone(),
-                        link: Some(ctx.entry.handle.clone()),
-                    };
-                    u.away.as_deref() == Some("dormant")
-                }
-                None => false,
-            };
-            if dormant {
-                crate::ops::set_away(cx, uid, Some("idle".to_string()));
+            if hub.set_live(account, &link_name) {
+                super::accounts::sync_account(cx, &hub, uid, account);
             }
         }
     });

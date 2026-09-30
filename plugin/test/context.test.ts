@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { buildContext } from "../src/context.ts"
+import { buildContext, CONTEXT_CHAR_CAP, PROTOCOL } from "../src/context.ts"
 import type { ContextInput } from "../src/context.ts"
 
 function input(over: Partial<ContextInput> = {}): ContextInput {
@@ -31,8 +31,16 @@ describe("buildContext", () => {
       'IRC (agent-comms): you are "fix-auth" in #lobby, #agent-comms, #fix-auth. ' +
         "Unread: #agent-comms 3, DM docs-bot 1 (use irc_read). " +
         "Wake budget 2/10 used. " +
-        "Tools: irc_send (announce/reply; no acknowledgement-only messages), irc_ask (blocking question), irc_wait, irc_read, irc_join, irc_part, irc_names, irc_list, irc_release.",
+        "Tools: irc_send (announce/reply; no acknowledgement-only messages), irc_ask (blocking question), irc_wait, irc_read, irc_join, irc_part, irc_names, irc_list, irc_release. " +
+        PROTOCOL,
     )
+  })
+
+  test("tells the agent to use IRC to reach other agents", () => {
+    const text = buildContext(input())
+    expect(text).toContain("Other agents cannot see your conversation")
+    expect(text).toContain("irc_ask")
+    expect(text).toContain("agent-comms skill")
   })
 
   test("no unread line when nothing is unread", () => {
@@ -95,10 +103,10 @@ describe("buildContext", () => {
     expect(text.length).toBeGreaterThan(3000)
   })
 
-  test("main text is capped at 1200 characters", () => {
+  test("main text is capped at CONTEXT_CHAR_CAP characters", () => {
     const channels = Array.from({ length: 200 }, (_, i) => `#channel-number-${i}`)
     const text = buildContext(input({ channels }))
-    expect(text.length).toBeLessThanOrEqual(1200)
+    expect(text.length).toBeLessThanOrEqual(CONTEXT_CHAR_CAP)
     expect(text.endsWith("…")).toBe(true)
   })
 })

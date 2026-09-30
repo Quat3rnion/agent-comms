@@ -37,9 +37,6 @@ pub struct LinkShared {
     pub config: Config,
     /// Failed handshakes for each source address (timestamps in the last minute).
     pub auth_failures: parking_lot::Mutex<HashMap<IpAddr, Vec<Instant>>>,
-    /// Owner link name for each account (folded account ID). Kept for dormant
-    /// accounts too. Loaded from the store at restore time.
-    pub owners: parking_lot::Mutex<HashMap<String, String>>,
     /// While a SEND of a PRIVMSG/NOTICE/TAGMSG runs for a virtual user, the
     /// msgid of the event that the user produced (filled by `on_message`).
     pub captured: parking_lot::Mutex<HashMap<UserId, String>>,
@@ -94,13 +91,10 @@ impl LinkCtx {
         self.reply(req, Message::new("FAIL", params));
     }
 
-    /// True when this link owns `account` (introduced by this link).
+    /// True when this link can act for `account`: the link is attached to it
+    /// (it introduced the account, and did not disconnect since).
     pub fn owns(&self, shared: &LinkShared, account: &str) -> bool {
-        shared
-            .owners
-            .lock()
-            .get(&crate::util::fold(account))
-            .is_some_and(|l| *l == self.entry.name)
+        shared.hub.is_attached(account, &self.entry.name)
     }
 }
 
@@ -115,7 +109,6 @@ impl LinkModule {
                 hub,
                 config: config.clone(),
                 auth_failures: parking_lot::Mutex::new(HashMap::new()),
-                owners: parking_lot::Mutex::new(HashMap::new()),
                 captured: parking_lot::Mutex::new(HashMap::new()),
                 restored: AtomicBool::new(false),
                 last_inactivity_check: parking_lot::Mutex::new(None),
@@ -151,6 +144,14 @@ impl Module for LinkModule {
 
     fn on_part(&self, cx: &mut Cx<'_>, user: UserId, channel: &str) {
         accounts::on_part(&self.shared, cx, user, channel);
+    }
+
+    fn on_secrets_reloaded(&self, _state: &SharedState, links_changed: bool) -> usize {
+        if links_changed {
+            self.shared.hub.close_all("credentials changed")
+        } else {
+            0
+        }
     }
 
     fn on_tick(&self, state: &SharedState, now: std::time::SystemTime) {

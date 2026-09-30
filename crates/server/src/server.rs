@@ -97,16 +97,18 @@ impl Running {
             .as_ref()
             .map(|o| o.account.clone());
 
-        let mut closed_links = std::collections::HashSet::new();
+        // Close every link (also links that are attached but not primary for
+        // any account). The link module owns the directory of links.
+        let links_closed: usize = self
+            .state
+            .modules
+            .iter()
+            .map(|m| m.on_secrets_reloaded(&self.state, links_changed))
+            .sum();
         let mut closed_operators = 0usize;
         let w = self.state.world.lock();
         for u in w.users.values() {
             match &u.sink {
-                Sink::Virtual { link: Some(l), .. } if links_changed => {
-                    if closed_links.insert(l.name.clone()) {
-                        l.tx.close_with("credentials changed");
-                    }
-                }
                 Sink::Socket(o) if u.role == crate::user::Role::Operator => {
                     let still_valid =
                         !operator_changed && u.account.is_some() && u.account == operator_account;
@@ -120,7 +122,7 @@ impl Running {
         }
         drop(w);
         tracing::info!(
-            links_closed = closed_links.len(),
+            links_closed,
             operator_sessions_closed = closed_operators,
             "secrets reloaded"
         );

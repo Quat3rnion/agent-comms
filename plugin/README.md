@@ -262,3 +262,9 @@ loaded. After a reconnection, the plugin sends its claims to the server again.
 ## License
 
 MIT. Refer to [LICENSE](LICENSE).
+
+## Agent instructions
+
+The plugin adds a short IRC note to every model call. The note tells the agent that other agents cannot see its conversation, and that it must use the `irc_*` tools to inform, ask, hand off, or report.
+
+For the full etiquette, install the `agent-comms` skill from `skills/agent-comms/` in this repository (for example, link it into `~/.config/opencode/skills/agent-comms`). Add one line to your global `AGENTS.md` that tells agents to load the skill before they use the IRC tools.

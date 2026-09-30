@@ -3,7 +3,7 @@
  * context text, claims, and the /irc command.
  */
 import { createHash } from "node:crypto"
-import { realpathSync } from "node:fs"
+import { appendFileSync, realpathSync } from "node:fs"
 import { hostname } from "node:os"
 import { resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
@@ -85,9 +85,19 @@ export interface Runtime {
 
 const PREFIX = "[agent-comms]"
 
+/** Log file for plugin diagnostics (AGENT_COMMS_PLUGIN_LOG overrides; "" disables). */
+const LOG_FILE =
+  process.env["AGENT_COMMS_PLUGIN_LOG"] ?? `${process.env["HOME"] ?? "."}/Library/Logs/agent-comms-plugin.log`
+
 function defaultLog(level: LogLevel, message: string): void {
   if (level === "warn") console.warn(`${PREFIX} ${message}`)
   else if (level === "error") console.error(`${PREFIX} ${message}`)
+  if (LOG_FILE === "" || level === "debug") return
+  try {
+    appendFileSync(LOG_FILE, `${new Date().toISOString()} pid=${process.pid} ${level} ${message}\n`)
+  } catch {
+    // Logging must never break the plugin.
+  }
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -246,6 +256,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
   const ourDir: string = ctx.location.directory
   const canonicalDir: string = ctx.location.project.canonical
   const project = projectSlug(canonicalDir !== "" ? canonicalDir : ourDir)
+  log("info", `setup location=${ourDir} project=${project}`)
 
   const registry = new Registry(ctx.storage, ourDir, (level, message) => log(level, message))
   const inbox = new Inbox({ previewChars: options.previewChars })
@@ -486,6 +497,10 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
         return undefined
       }
       if (info === null || info.directory !== ourDir || info.archived) {
+        log(
+          "info",
+          `not adopting ${sessionID}: ${info === null ? "no session info" : info.archived ? "archived" : `directory ${info.directory} is not ${ourDir}`}`,
+        )
         rejected.add(sessionID)
         return undefined
       }
@@ -866,12 +881,14 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
   unsubscribe.push(link.on("line", onLine))
   unsubscribe.push(
     link.on("established", () => {
+      log("info", `link established location=${ourDir} sessions=${registry.ownedBy(ourDir).length}`)
       everEstablished = true
       track(afterEstablished())
     }),
   )
   unsubscribe.push(
     link.on("down", () => {
+      log("info", `link down location=${ourDir}`)
       introducedOnLink.clear()
       assembler = new MultilineAssembler()
     }),
@@ -1054,6 +1071,10 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     await ctx.session.hook("context", async (ev) => {
       const rec = registry.get(ev.sessionID) ?? (await adopt(ev.sessionID))
       if (!rec) return
+      // A model call means the session runs a turn. The execution events can be
+      // missed (for example a turn that started before the plugin loaded), and
+      // the server would then show the agent as AWAY idle.
+      if (!rec.busy) await onBusy(ev.sessionID, true)
       ev.system.push({ type: "text", text: contextText(rec) })
     }),
   )
@@ -1107,6 +1128,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     hop,
     claims,
     options,
+    adopt: (sessionID: string) => adopt(sessionID),
     onChannelsChanged: (sessionID: string) => registry.persist(sessionID),
     redeliver,
   }

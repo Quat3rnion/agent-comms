@@ -110,6 +110,11 @@ pub trait Module: Send + Sync + 'static {
     fn on_nick(&self, _cx: &mut Cx<'_>, _user: UserId, _old: &str, _new: &str) {}
     fn on_quit(&self, _cx: &mut Cx<'_>, _user: UserId, _reason: &str) {}
     fn on_tick(&self, _state: &SharedState, _now: std::time::SystemTime) {}
+    /// Secrets were replaced at run time. `links_changed` is true when the
+    /// link credentials changed. Returns the number of connections closed.
+    fn on_secrets_reloaded(&self, _state: &SharedState, _links_changed: bool) -> usize {
+        0
+    }
     fn take_link(&self, _state: SharedState, conn: LineConn, _first: Message) -> Option<LineConn> {
         Some(conn)
     }

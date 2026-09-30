@@ -4,6 +4,7 @@
 
 use super::{LinkCtx, LinkPhase, LinkShared};
 use crate::module::Cx;
+use crate::modules::hub::LinkHub;
 use crate::ops;
 use crate::state::{SharedState, World};
 use crate::store::{AccountRow, Store};
@@ -99,6 +100,21 @@ fn set_sink_link(world: &mut World, uid: UserId, handle: Option<LinkHandle>) {
         if let Sink::Virtual { link, .. } = &mut u.sink {
             *link = handle;
         }
+    }
+}
+
+/// Point the sink of `uid` at the primary link of `account`, and set the AWAY
+/// state from the aggregate presence. AWAY changes (and away-notify) only
+/// when the aggregate changes.
+pub(super) fn sync_account(cx: &mut Cx<'_>, hub: &LinkHub, uid: UserId, account: &str) {
+    set_sink_link(cx.world, uid, hub.primary(account));
+    let want = hub.presence(account).away();
+    if cx
+        .world
+        .user(uid)
+        .is_some_and(|u| u.away.as_deref() != want)
+    {
+        ops::set_away(cx, uid, want.map(str::to_string));
     }
 }
 
@@ -219,6 +235,16 @@ enum Introduced {
     Fail(&'static str, &'static str),
 }
 
+/// Parameters of one `INTRODUCE` line.
+struct IntroduceFields<'a> {
+    account: &'a str,
+    wanted: &'a str,
+    parent: &'a str,
+    owner: &'a str,
+    project: &'a str,
+    realname: &'a str,
+}
+
 fn introduce(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, msg: &Message) {
     if msg.params.len() < 6 {
         let ctxp: Vec<&str> = msg.param(0).into_iter().collect();
@@ -272,42 +298,36 @@ fn introduce(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, m
     restore(shared, state);
 
     let key = fold(account);
-    let link_name = ctx.entry.name.clone();
     let handle = ctx.entry.handle.clone();
-    let established = ctx.phase == LinkPhase::Established;
+    // During the burst the link is attached at once (it can act for the
+    // account), but it gets deliveries only after its server burst.
+    let live = ctx.phase == LinkPhase::Established;
     let store = shared.hub.store().cloned();
-    let prev_owner = shared.owners.lock().get(&key).cloned();
+    let hub = shared.hub.clone();
     let memo = project_memo()
         .lock()
         .get(&memo_key(shared, account))
         .cloned();
 
+    let fields = IntroduceFields {
+        account,
+        wanted,
+        parent,
+        owner,
+        project,
+        realname,
+    };
     let outcome = state.with_world(|cx| match cx.world.find_account(account) {
-        None => introduce_new(
-            cx,
-            store.as_ref(),
-            account,
-            wanted,
-            parent,
-            owner,
-            project,
-            realname,
-            &link_name,
-            established.then(|| handle.clone()),
-        ),
+        None => introduce_new(cx, store.as_ref(), &hub, &fields, &handle, live),
         Some(uid) => introduce_existing(
             cx,
             store.as_ref(),
+            &hub,
             uid,
-            account,
-            wanted,
-            parent,
-            owner,
-            project,
-            realname,
-            &link_name,
+            &fields,
             memo.clone(),
-            established.then(|| handle.clone()),
+            &handle,
+            live,
         ),
     });
 
@@ -319,15 +339,9 @@ fn introduce(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, m
         }
     };
 
-    shared.owners.lock().insert(key.clone(), link_name.clone());
     project_memo()
         .lock()
         .insert(memo_key(shared, account), project.to_string());
-    if let Some(old) = prev_owner.filter(|o| *o != link_name) {
-        shared
-            .hub
-            .send(&old, &Message::new("DISOWN", vec![canonical.clone()]));
-    }
     touch(shared, &canonical);
 
     ctx.reply(
@@ -340,61 +354,58 @@ fn introduce(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, m
     call_nick_extensions(shared, state, &canonical, &nick);
 }
 
-#[expect(clippy::too_many_arguments, reason = "INTRODUCE has many parameters")]
 fn introduce_new(
     cx: &mut Cx<'_>,
     store: Option<&Arc<Store>>,
-    account: &str,
-    wanted: &str,
-    parent: &str,
-    owner: &str,
-    project: &str,
-    realname: &str,
-    link_name: &str,
-    handle: Option<LinkHandle>,
+    hub: &LinkHub,
+    f: &IntroduceFields<'_>,
+    handle: &LinkHandle,
+    live: bool,
 ) -> Introduced {
-    let parent_uid = if parent == "*" {
+    let parent_uid = if f.parent == "*" {
         None
     } else {
-        match cx.world.find_account(parent) {
+        match cx.world.find_account(f.parent) {
             Some(p) => Some(p),
             None => return Introduced::Fail("INVALID_PARENT", "Parent account does not exist"),
         }
     };
     let max = cx.state.config.limits.nick_max_len;
-    let nick = assign_nick(cx.world, wanted, max, None);
+    let nick = assign_nick(cx.world, f.wanted, max, None);
     let uid = cx.world.create_virtual_user(
-        account,
+        f.account,
         &nick,
-        realname,
+        f.realname,
         Role::Agent,
         parent_uid,
-        Some(owner.to_string()),
-        handle,
+        Some(f.owner.to_string()),
+        None,
     );
     ops::set_away(cx, uid, Some("idle".to_string()));
+    hub.attach(f.account, handle, live);
+    sync_account(cx, hub, uid, f.account);
 
     if let Some(store) = store {
         let now = unix_now();
         let row = AccountRow {
-            account: account.to_string(),
+            account: f.account.to_string(),
             nick: nick.clone(),
             parent: parent_uid.and_then(|p| account_of(cx.world, p)),
-            owner: owner.to_string(),
+            owner: f.owner.to_string(),
             role: Role::Agent.as_str().to_string(),
-            link: Some(link_name.to_string()),
-            project: Some(project.to_string()),
-            realname: realname.to_string(),
+            link: Some(handle.name.clone()),
+            project: Some(f.project.to_string()),
+            realname: f.realname.to_string(),
             created: now,
             last_activity: now,
         };
         if let Err(e) = store.upsert_account(&row) {
-            tracing::warn!("store upsert_account failed for {account}: {e}");
+            tracing::warn!("store upsert_account failed for {}: {e}", f.account);
         }
     }
 
     ops::join(cx, uid, "#lobby", false);
-    let project_chan = format!("#{project}");
+    let project_chan = format!("#{}", f.project);
     ops::join(cx, uid, &project_chan, false);
     if let Some(p) = parent_uid {
         if let Some(pnick) = cx.world.user(p).map(|u| u.nick.clone()) {
@@ -406,46 +417,51 @@ fn introduce_new(
         }
     }
     Introduced::Ok {
-        canonical: account.to_string(),
+        canonical: f.account.to_string(),
         nick,
     }
 }
 
+/// INTRODUCE of an existing account (section "Shared accounts"): attach the
+/// link. The nick and the parent do not change; the realname and the project
+/// change when the line has new values.
 #[expect(clippy::too_many_arguments, reason = "INTRODUCE has many parameters")]
 fn introduce_existing(
     cx: &mut Cx<'_>,
     store: Option<&Arc<Store>>,
+    hub: &LinkHub,
     uid: UserId,
-    account: &str,
-    wanted: &str,
-    parent: &str,
-    owner: &str,
-    project: &str,
-    realname: &str,
-    link_name: &str,
+    f: &IntroduceFields<'_>,
     memo_project: Option<String>,
-    handle: Option<LinkHandle>,
+    handle: &LinkHandle,
+    live: bool,
 ) -> Introduced {
     let Some(u) = cx.world.user(uid) else {
         return Introduced::Fail("UNKNOWN_ACCOUNT", "No such account");
     };
-    if u.owner.as_deref().is_some_and(|o| o != owner) {
+    if u.owner.as_deref().is_some_and(|o| o != f.owner) {
         return Introduced::Fail("OWNER_MISMATCH", "Account belongs to another owner");
     }
-    let canonical = account_of(cx.world, uid).unwrap_or_else(|| account.to_string());
+    let canonical = account_of(cx.world, uid).unwrap_or_else(|| f.account.to_string());
+    let nick = u.nick.clone();
     let cur_parent = u.parent;
     let cur_parent_account = cur_parent.and_then(|p| account_of(cx.world, p));
-    let parent_ok = match (parent, cur_parent) {
+    let parent_same = match (f.parent, cur_parent) {
         ("*", None) => true,
-        ("*", Some(_)) => false,
-        (_, None) => false,
+        ("*", Some(_)) | (_, None) => false,
         // A retired parent no longer resolves; accept the stored relation.
         (p, Some(_)) => cur_parent_account
             .as_deref()
             .is_none_or(|c| fold(c) == fold(p)),
     };
-    if !parent_ok {
-        return Introduced::Fail("PARENT_MISMATCH", "Account exists with another parent");
+    if !parent_same {
+        tracing::debug!(
+            account = %canonical,
+            link = %handle.name,
+            parent = %f.parent,
+            current = ?cur_parent_account,
+            "INTRODUCE with another parent: the first parent stays"
+        );
     }
 
     let row = store.and_then(|s| match s.get_account(&canonical) {
@@ -456,29 +472,28 @@ fn introduce_existing(
         }
     });
 
-    // Detach until the server burst of this link attaches the handle, or
-    // attach now when the link is already established.
-    set_sink_link(cx.world, uid, handle);
+    hub.attach(&canonical, handle, live);
+    sync_account(cx, hub, uid, &canonical);
 
-    let nick = apply_rename(cx, store, uid, &canonical, wanted);
-    if let Some(u) = cx.world.user_mut(uid) {
-        u.realname = realname.to_string();
-    }
-    if cx
+    let mut realname = cx
         .world
         .user(uid)
-        .is_some_and(|u| u.away.as_deref() == Some("dormant"))
-    {
-        ops::set_away(cx, uid, Some("idle".to_string()));
+        .map(|u| u.realname.clone())
+        .unwrap_or_default();
+    if !f.realname.is_empty() && f.realname != realname {
+        realname = f.realname.to_string();
+        if let Some(u) = cx.world.user_mut(uid) {
+            u.realname = realname.clone();
+        }
     }
 
     let old_project = row
         .as_ref()
         .and_then(|r| r.project.clone())
         .or(memo_project);
-    let new_chan = format!("#{project}");
+    let new_chan = format!("#{}", f.project);
     match old_project {
-        Some(old) if old == project => {}
+        Some(old) if old == f.project => {}
         Some(old) => {
             ops::part(cx, uid, &format!("#{old}"), Some("moved"));
             ops::join(cx, uid, &new_chan, false);
@@ -497,11 +512,11 @@ fn introduce_existing(
                 .as_ref()
                 .and_then(|r| r.parent.clone())
                 .or(cur_parent_account),
-            owner: owner.to_string(),
+            owner: f.owner.to_string(),
             role: Role::Agent.as_str().to_string(),
-            link: Some(link_name.to_string()),
-            project: Some(project.to_string()),
-            realname: realname.to_string(),
+            link: Some(handle.name.clone()),
+            project: Some(f.project.to_string()),
+            realname,
             created: row.as_ref().map(|r| r.created).unwrap_or(now),
             last_activity: now,
         };
@@ -575,10 +590,20 @@ fn retire(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, msg:
         return;
     }
     let reason = msg.param(1).filter(|r| !r.is_empty()).unwrap_or("retired");
+    let others: Vec<String> = shared
+        .hub
+        .attached_links(account)
+        .into_iter()
+        .filter(|l| *l != ctx.entry.name)
+        .collect();
     retire_account(shared, state, account, reason);
     let key = fold(account);
     ctx.accounts.retain(|a| fold(a) != key);
-    ctx.reply(msg, Message::new("RETIRED", vec![account.to_string()]));
+    let retired = Message::new("RETIRED", vec![account.to_string()]);
+    for link in others {
+        shared.hub.send(&link, &retired);
+    }
+    ctx.reply(msg, retired);
 }
 
 /// Retire an account (section 6.6). Children are not retired. Returns false
@@ -599,7 +624,7 @@ pub fn retire_account(
         Some(canonical)
     });
     let canonical = in_world.clone().unwrap_or_else(|| account.to_string());
-    let owned = shared.owners.lock().remove(&key).is_some();
+    let owned = !shared.hub.remove_account(&key).is_empty();
     project_memo().lock().remove(&memo_key(shared, account));
     // Extensions first: the claims module must see (and announce) the claims
     // before the store deletes them with the account.
@@ -652,12 +677,16 @@ fn set_state(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, m
             return;
         }
     };
+    let hub = shared.hub.clone();
+    let link_name = ctx.entry.name.clone();
     let canonical = state.with_world(|cx| {
         let uid = cx.world.find_account(account)?;
-        let away = (!busy).then(|| "idle".to_string());
-        if cx.world.user(uid).is_some_and(|u| u.away != away) {
-            ops::set_away(cx, uid, away);
+        if !hub.set_busy(account, &link_name, busy) {
+            return None;
         }
+        // The account is busy when any attached link reports busy; the
+        // primary link can change.
+        sync_account(cx, &hub, uid, account);
         Some(account_of(cx.world, uid).unwrap_or_else(|| account.to_string()))
     });
     let Some(canonical) = canonical else {
@@ -678,8 +707,10 @@ fn set_state(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, m
 // ---------------------------------------------------------------------------
 // Link down, restore, tick, membership persistence
 
-/// The link closed: its accounts stay in their channels as dormant users
-/// (section 6.8). Ownership persists.
+/// The link closed: detach it from its accounts. An account that has other
+/// attached links stays present, and its deliveries go to the new primary
+/// link. An account without attached links stays in its channels as a dormant
+/// user (section 6.8).
 pub fn link_down(shared: &Arc<LinkShared>, state: &SharedState, ctx: &LinkCtx) {
     // A newer connection with the same name replaced this one: keep its state.
     if let Some(cur) = shared.hub.get(&ctx.entry.name) {
@@ -687,35 +718,13 @@ pub fn link_down(shared: &Arc<LinkShared>, state: &SharedState, ctx: &LinkCtx) {
             return;
         }
     }
-    let mine: Vec<String> = shared
-        .owners
-        .lock()
-        .iter()
-        .filter(|(_, l)| **l == ctx.entry.name)
-        .map(|(k, _)| k.clone())
-        .collect();
+    let hub = shared.hub.clone();
     state.with_world(|cx| {
-        for key in mine {
+        for key in hub.detach_link(&ctx.entry.handle) {
             let Some(uid) = cx.world.accounts.get(&key).copied() else {
                 continue;
             };
-            let attached_elsewhere = match cx.world.user(uid).map(|u| &u.sink) {
-                Some(Sink::Virtual { link: Some(h), .. }) => {
-                    !h.tx.same_channel(&ctx.entry.handle.tx)
-                }
-                _ => false,
-            };
-            if attached_elsewhere {
-                continue;
-            }
-            set_sink_link(cx.world, uid, None);
-            if cx
-                .world
-                .user(uid)
-                .is_some_and(|u| u.away.as_deref() != Some("dormant"))
-            {
-                ops::set_away(cx, uid, Some("dormant".to_string()));
-            }
+            sync_account(cx, &hub, uid, &key);
         }
     });
 }
@@ -751,7 +760,6 @@ pub fn restore(shared: &Arc<LinkShared>, state: &SharedState) {
         })
         .collect();
 
-    let mut owners: Vec<(String, String)> = Vec::new();
     state.with_world(|cx| {
         // Parents before children; a parent that never resolves (a cycle or a
         // retired parent) is dropped on the last pass.
@@ -769,20 +777,12 @@ pub fn restore(shared: &Arc<LinkShared>, state: &SharedState) {
                     continue;
                 }
                 progress = true;
-                if let Some(link) = item.row.link.clone() {
-                    owners.push((fold(&item.row.account), link));
-                }
                 restore_one(cx, &store, item);
             }
             pending = rest;
             force = !progress;
         }
     });
-
-    let mut map = shared.owners.lock();
-    for (k, link) in owners {
-        map.entry(k).or_insert(link);
-    }
 }
 
 fn restore_one(cx: &mut Cx<'_>, store: &Arc<Store>, item: RestoreItem) {
@@ -850,13 +850,17 @@ pub fn on_tick(shared: &Arc<LinkShared>, state: &SharedState, now: SystemTime) {
         }
     };
     for account in inactive {
-        let owner = shared.owners.lock().get(&fold(&account)).cloned();
+        // The attached links, or else the link that attached the account last.
+        let mut links = shared.hub.attached_links(&account);
+        if links.is_empty() {
+            if let Ok(Some(row)) = store.get_account(&account) {
+                links.extend(row.link);
+            }
+        }
         if retire_account(shared, state, &account, "inactive") {
-            if let Some(link) = owner {
-                shared.hub.send(
-                    &link,
-                    &Message::new("RETIRED", vec![account.clone(), "inactive".to_string()]),
-                );
+            let m = Message::new("RETIRED", vec![account.clone(), "inactive".to_string()]);
+            for link in links {
+                shared.hub.send(&link, &m);
             }
         }
     }

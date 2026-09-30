@@ -1,7 +1,16 @@
 /** Builds the compact per-session system text. Pure. */
 import type { FailMode } from "./types.ts"
 
-export const CONTEXT_CHAR_CAP = 1200
+export const CONTEXT_CHAR_CAP = 1600
+
+/** Always-on working rules. The `agent-comms` skill has the full etiquette. */
+export const PROTOCOL =
+  "Other agents cannot see your conversation: IRC is the only way to reach them. " +
+  "Whenever you need to tell, ask, hand off or report something to another agent or the operator, use the IRC tools " +
+  "(irc_send to inform, irc_ask to get an answer, irc_list/irc_names to find who to address). " +
+  "At the start of a task post one line in your project channel saying what you work on; " +
+  "before you edit files other agents may touch, run irc_read; when you finish, post a one-line result; " +
+  "subagents report to their parent by nick. Load the agent-comms skill for details."
 const MAX_UNREAD_TARGETS = 5
 
 export interface ContextInput {
@@ -80,6 +89,7 @@ export function buildContext(input: ContextInput): string {
   parts.push(
     "Tools: irc_send (announce/reply; no acknowledgement-only messages), irc_ask (blocking question), irc_wait, irc_read, irc_join, irc_part, irc_names, irc_list, irc_release.",
   )
+  parts.push(PROTOCOL)
 
   return cap(parts.join(" ")) + (input.joinContext ? `\n${input.joinContext}` : "")
 }
