@@ -30,9 +30,27 @@ export interface WaitOptions {
   replyTo: string
   timeoutMs: number
   signal?: AbortSignal
+  /** Ask window from `beginAsk`. Messages buffered in the window are checked first. */
+  handle?: AskHandle
 }
 
-export type OfferResult = "consumed-as-reply" | "interrupted-waiter" | "none"
+/** Result of `offer`. "buffered": an ask window holds the message; the caller must not push it. */
+export type OfferResult = "consumed-as-reply" | "interrupted-waiter" | "buffered" | "none"
+
+/** An open ask window. Opaque to callers. */
+export interface AskHandle {
+  readonly sessionID: string
+}
+
+interface AskWindow extends AskHandle {
+  /** True until `waitFor` is called with this handle. */
+  pending: boolean
+}
+
+interface Buffered {
+  message: InboundMessage
+  directed: boolean
+}
 
 interface Waiter {
   replyTo: string
@@ -55,6 +73,9 @@ interface SessionState {
   server: Map<string, number>
   lastRead: Map<string, string>
   waiters: Waiter[]
+  asks: AskWindow[]
+  /** Messages that arrived while an ask window was pending. Shared by the windows of the session. */
+  askBuffer: Buffered[]
   join: JoinContext[]
 }
 
@@ -97,6 +118,8 @@ export class Inbox {
         server: new Map(),
         lastRead: new Map(),
         waiters: [],
+        asks: [],
+        askBuffer: [],
         join: [],
       }
       this.sessions.set(sessionID, s)
@@ -116,6 +139,12 @@ export class Inbox {
       s.byId.delete(old.msgid)
       s.unread.delete(old.msgid)
     }
+  }
+
+  /** Mark a stored message as unread again. */
+  markUnread(sessionID: string, msgid: string): void {
+    const s = this.sessions.get(sessionID)
+    if (s?.byId.has(msgid)) s.unread.add(msgid)
   }
 
   /** Unread per target, counting local unread messages plus server-seeded counts. */
@@ -212,12 +241,58 @@ export class Inbox {
   // Waiters
   // -------------------------------------------------------------------------
 
+  /**
+   * Open an ask window before the question is sent. Until `waitFor` is called with the
+   * handle, directed messages and replies are buffered instead of pushed.
+   * Always call `endAsk` afterwards.
+   */
+  beginAsk(sessionID: string): AskHandle {
+    const w: AskWindow = { sessionID, pending: true }
+    this.state(sessionID).asks.push(w)
+    return w
+  }
+
+  /**
+   * Close an ask window. Returns the buffered messages that no window used, for normal
+   * delivery by the caller. Returns nothing while another window of the session is pending.
+   */
+  endAsk(handle: AskHandle): InboundMessage[] {
+    const s = this.sessions.get(handle.sessionID)
+    if (!s) return []
+    const idx = s.asks.indexOf(handle as AskWindow)
+    if (idx === -1) return []
+    s.asks.splice(idx, 1)
+    if (s.asks.some((a) => a.pending)) return []
+    const released = s.askBuffer.map((b) => b.message)
+    s.askBuffer = []
+    return released
+  }
+
+  /** Take the reply, or else the first directed message, from the ask buffer. */
+  private takeBuffered(s: SessionState, replyTo: string): WaitResult | null {
+    const ri = s.askBuffer.findIndex((b) => b.message.replyTo === replyTo)
+    const idx = ri !== -1 ? ri : s.askBuffer.findIndex((b) => b.directed)
+    if (idx === -1) return null
+    const [hit] = s.askBuffer.splice(idx, 1)
+    if (!hit) return null
+    return ri !== -1 ? { kind: "reply", message: hit.message } : { kind: "interrupted", message: hit.message }
+  }
+
   waitFor(sessionID: string, opts: WaitOptions): Promise<WaitResult> {
     const s = this.state(sessionID)
+    const win = opts.handle === undefined ? undefined : s.asks.find((a) => a === opts.handle)
     return new Promise<WaitResult>((resolve) => {
+      if (win) win.pending = false
       if (opts.signal?.aborted) {
         resolve({ kind: "aborted" })
         return
+      }
+      if (win) {
+        const early = this.takeBuffered(s, opts.replyTo)
+        if (early) {
+          resolve(early)
+          return
+        }
       }
       const waiter: Waiter = {
         replyTo: opts.replyTo,
@@ -244,11 +319,13 @@ export class Inbox {
   /**
    * Offer an inbound message to the waiters of a session before deciding to push it.
    * A reply is consumed by its waiter. Another directed message interrupts the waiters
-   * and is returned in their result. In both cases the caller must not push the message.
+   * and is returned in their result. While an ask window is pending (question not yet
+   * sent), a directed message or any reply is buffered in the window.
+   * In all these cases the caller must not push the message.
    */
   offer(sessionID: string, m: InboundMessage, directed: boolean): OfferResult {
     const s = this.sessions.get(sessionID)
-    if (!s || s.waiters.length === 0) return "none"
+    if (!s) return "none"
     if (m.replyTo !== null) {
       const hit = s.waiters.find((w) => w.replyTo === m.replyTo)
       if (hit) {
@@ -257,7 +334,13 @@ export class Inbox {
         return "consumed-as-reply"
       }
     }
-    if (!directed) return "none"
+    if (!directed || s.waiters.length === 0) {
+      if ((directed || m.replyTo !== null) && s.asks.some((a) => a.pending)) {
+        s.askBuffer.push({ message: m, directed })
+        return "buffered"
+      }
+      return "none"
+    }
     for (const w of [...s.waiters]) {
       w.cleanup()
       w.resolve({ kind: "interrupted", message: m })

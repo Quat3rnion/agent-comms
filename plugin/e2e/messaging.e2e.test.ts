@@ -397,16 +397,23 @@ describe("mutual_ask_no_deadlock", () => {
           e.opencode.prompt(aID, `${GO} ask mutual-beta`, { tag: "mutual-a" }),
           e.opencode.prompt(bID, `${GO} ask mutual-alpha`, { tag: "mutual-b" }),
         ])
-        await Promise.all([e.opencode.waitIdle(aID, 60_000), e.opencode.waitIdle(bID, 60_000)])
+        await Promise.all([e.opencode.waitIdle(aID, 20_000), e.opencode.waitIdle(bID, 20_000)])
         const elapsed = Date.now() - started
-        expect(elapsed).toBeLessThan(60_000)
+        // The ask timeout is 30 s. Both sessions must return well before it.
+        expect(elapsed).toBeLessThan(20_000)
 
-        const results = e.model.requests
-          .filter((r) => r.index >= mark && r.kind === "primary" && (r.tag === "mutual-a" || r.tag === "mutual-b"))
-          .flatMap((r) => toolResultsFor(r, "irc_ask"))
-        expect(results.length).toBeGreaterThan(0)
-        const early = results.filter((t) => t.includes("No answer yet") || t.includes("Answer from"))
-        expect(early.length).toBeGreaterThan(0)
+        const resultsFor = (tag: string): string[] =>
+          e.model.requests
+            .filter((r) => r.index >= mark && r.kind === "primary" && r.tag === tag)
+            .flatMap((r) => toolResultsFor(r, "irc_ask"))
+        for (const tag of ["mutual-a", "mutual-b"]) {
+          const results = resultsFor(tag)
+          expect(results.length).toBeGreaterThan(0)
+          for (const t of results) {
+            expect(t).not.toContain("No answer within")
+            expect(t.includes("No answer yet") || t.includes("Answer from")).toBe(true)
+          }
+        }
       })
     },
     90_000,

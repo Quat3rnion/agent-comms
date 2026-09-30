@@ -202,6 +202,86 @@ describe("Inbox waiters", () => {
   })
 })
 
+describe("Inbox ask window", () => {
+  test("a reply that arrives before waitFor is returned as the reply", async () => {
+    const inbox = new Inbox({ previewChars: 10 })
+    const h = inbox.beginAsk("s1")
+    const reply = inbound({ msgid: "r1", replyTo: "q1" })
+    expect(inbox.offer("s1", reply, false)).toBe("buffered")
+    expect(await inbox.waitFor("s1", { replyTo: "q1", timeoutMs: 1000, handle: h })).toEqual({
+      kind: "reply",
+      message: reply,
+    })
+    expect(inbox.hasWaiter("s1")).toBe(false)
+    expect(inbox.endAsk(h)).toEqual([])
+  })
+
+  test("a directed message that arrives before waitFor interrupts", async () => {
+    const inbox = new Inbox({ previewChars: 10 })
+    const h = inbox.beginAsk("s1")
+    const other = inbound({ msgid: "o1", target: "me", isChannel: false })
+    expect(inbox.offer("s1", other, true)).toBe("buffered")
+    expect(await inbox.waitFor("s1", { replyTo: "q1", timeoutMs: 1000, handle: h })).toEqual({
+      kind: "interrupted",
+      message: other,
+    })
+    expect(inbox.endAsk(h)).toEqual([])
+  })
+
+  test("the reply wins over an earlier directed message, which is released", async () => {
+    const inbox = new Inbox({ previewChars: 10 })
+    const h = inbox.beginAsk("s1")
+    const other = inbound({ msgid: "o1", target: "me", isChannel: false })
+    const reply = inbound({ msgid: "r1", replyTo: "q1" })
+    expect(inbox.offer("s1", other, true)).toBe("buffered")
+    expect(inbox.offer("s1", reply, false)).toBe("buffered")
+    expect(await inbox.waitFor("s1", { replyTo: "q1", timeoutMs: 1000, handle: h })).toEqual({
+      kind: "reply",
+      message: reply,
+    })
+    expect(inbox.endAsk(h)).toEqual([other])
+  })
+
+  test("unused buffered messages are released by endAsk", async () => {
+    const inbox = new Inbox({ previewChars: 10 })
+    const h = inbox.beginAsk("s1")
+    const unrelated = inbound({ msgid: "u1", replyTo: "zzz" })
+    expect(inbox.offer("s1", unrelated, false)).toBe("buffered")
+    expect(inbox.offer("s1", inbound({ msgid: "c1" }), false)).toBe("none")
+    expect(await inbox.waitFor("s1", { replyTo: "q1", timeoutMs: 10, handle: h })).toEqual({ kind: "timeout" })
+    expect(inbox.endAsk(h)).toEqual([unrelated])
+    expect(inbox.endAsk(h)).toEqual([])
+  })
+
+  test("endAsk after a failed send releases everything", () => {
+    const inbox = new Inbox({ previewChars: 10 })
+    const h = inbox.beginAsk("s1")
+    const a = inbound({ msgid: "a", target: "me", isChannel: false })
+    const b = inbound({ msgid: "b", replyTo: "x" })
+    inbox.offer("s1", a, true)
+    inbox.offer("s1", b, false)
+    expect(inbox.endAsk(h)).toEqual([a, b])
+    expect(inbox.offer("s1", inbound({ msgid: "c", target: "me", isChannel: false }), true)).toBe("none")
+  })
+
+  test("messages go to the waiter after waitFor registers it", async () => {
+    const inbox = new Inbox({ previewChars: 10 })
+    const h = inbox.beginAsk("s1")
+    const p = inbox.waitFor("s1", { replyTo: "q1", timeoutMs: 1000, handle: h })
+    const reply = inbound({ msgid: "r1", replyTo: "q1" })
+    expect(inbox.offer("s1", reply, false)).toBe("consumed-as-reply")
+    expect(await p).toEqual({ kind: "reply", message: reply })
+    expect(inbox.offer("s1", inbound({ msgid: "u1", replyTo: "zzz" }), false)).toBe("none")
+    expect(inbox.endAsk(h)).toEqual([])
+  })
+
+  test("without a window the old behaviour stays", () => {
+    const inbox = new Inbox({ previewChars: 10 })
+    expect(inbox.offer("s1", inbound({ replyTo: "q1" }), true)).toBe("none")
+    expect(inbox.offer("s1", inbound({ msgid: "d1" }), true)).toBe("none")
+  })
+})
+
 describe("Inbox join context", () => {
   test("returns text once", () => {
     const inbox = new Inbox({ previewChars: 10 })

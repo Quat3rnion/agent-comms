@@ -7,11 +7,11 @@ import type { Plugin } from "@opencode/plugin"
 import type { ClaimTracker } from "./claims.ts"
 import { releaseLine } from "./claims.ts"
 import type { HopTracker } from "./delivery.ts"
-import type { Inbox, WaitResult } from "./inbox.ts"
+import type { AskHandle, Inbox, WaitResult } from "./inbox.ts"
 import type { LinkClient, SendResult } from "./link.ts"
 import type { IrcMessage, Tags } from "./proto.ts"
 import { getTag, msg, sourceNick, vendorTag } from "./proto.ts"
-import type { LinkApi, Options, RegistryApi, SessionRecord } from "./types.ts"
+import type { InboundMessage, LinkApi, Options, RegistryApi, SessionRecord } from "./types.ts"
 import { LinkDownError } from "./types.ts"
 
 export interface ToolDeps {
@@ -23,6 +23,11 @@ export interface ToolDeps {
   options: Options
   /** Called after a tool changed membership so the caller can refresh the session's channels. */
   onChannelsChanged?: (sessionID: string) => void
+  /**
+   * Deliver messages that an ask window held but did not use, as if they had just arrived.
+   * Without it, the messages are marked unread.
+   */
+  redeliver?: (sessionID: string, messages: InboundMessage[]) => void
 }
 
 export interface ToolDef {
@@ -288,13 +293,28 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     return result.msgid
   }
 
-  async function awaitReply(ctx: ToolCtx, askMsgid: string, timeoutSec: number): Promise<string> {
+  async function awaitReply(ctx: ToolCtx, askMsgid: string, timeoutSec: number, handle?: AskHandle): Promise<string> {
     const r = await inbox.waitFor(ctx.sessionID, {
       replyTo: askMsgid,
       timeoutMs: timeoutSec * 1000,
       signal: ctx.signal,
+      handle,
     })
     return formatWait(r, askMsgid, timeoutSec)
+  }
+
+  /** Close an ask window and hand the unused buffered messages back for normal delivery. */
+  function closeAsk(sessionID: string, handle: AskHandle): void {
+    const released = inbox.endAsk(handle)
+    if (released.length === 0) return
+    if (deps.redeliver) {
+      deps.redeliver(sessionID, released)
+      return
+    }
+    for (const m of released) {
+      inbox.add(sessionID, m, true)
+      inbox.markUnread(sessionID, m.msgid)
+    }
   }
 
   function requireLink(): void {
@@ -361,8 +381,16 @@ export function buildTools(deps: ToolDeps): ToolDef[] {
     true,
     async (a, ctx, rec) => {
       const timeoutSec = timeoutSeconds(a, options)
-      const msgid = await transmit(rec, ctx.sessionID, reqString(a, "target"), reqString(a, "question"), undefined)
-      return awaitReply(ctx, msgid, timeoutSec)
+      const target = reqString(a, "target")
+      const question = reqString(a, "question")
+      // Open the window before the send: a message can arrive before the msgid is known.
+      const handle = inbox.beginAsk(ctx.sessionID)
+      try {
+        const msgid = await transmit(rec, ctx.sessionID, target, question, undefined)
+        return await awaitReply(ctx, msgid, timeoutSec, handle)
+      } finally {
+        closeAsk(ctx.sessionID, handle)
+      }
     },
   )
 

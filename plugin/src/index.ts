@@ -662,12 +662,39 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     }
     const me = { nick: rec.nick, aliases: registry.aliases(sessionID) }
     const directedness = classify(m, me)
+    // "buffered": an ask window holds the message. Store it as read; the window either
+    // uses it or hands it back through redeliver.
     const offer = inbox.offer(sessionID, m, directedness === "directed")
     if (offer !== "none") {
       inbox.add(sessionID, m, false)
       return
     }
+    await dispatch(sessionID, rec, m)
+  }
 
+  /** Deliver messages that an ask window did not use, as if they had just arrived. */
+  function redeliver(sessionID: string, messages: InboundMessage[]): void {
+    track(
+      (async () => {
+        for (const m of messages) {
+          const rec = registry.get(sessionID)
+          if (!rec) return
+          await dispatch(sessionID, rec, m)
+        }
+      })(),
+    )
+  }
+
+  /** Store a message. It can already be stored as read by an ask window. */
+  function store(sessionID: string, m: InboundMessage, unread: boolean): void {
+    inbox.add(sessionID, m, unread)
+    if (unread) inbox.markUnread(sessionID, m.msgid)
+  }
+
+  /** Decide how to deliver an inbound message, then push it or keep it unread. */
+  async function dispatch(sessionID: string, rec: SessionRecord, m: InboundMessage): Promise<void> {
+    const me = { nick: rec.nick, aliases: registry.aliases(sessionID) }
+    const directedness = classify(m, me)
     const now = clock()
     const budget = budgetFor(sessionID)
     const decision = decide({
@@ -683,7 +710,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
 
     if (decision.kind === "unread") {
       if (decision.reason === "hop-limit") hopBlocked.set(sessionID, (hopBlocked.get(sessionID) ?? 0) + 1)
-      inbox.add(sessionID, m, true)
+      store(sessionID, m, true)
       return
     }
 
@@ -694,7 +721,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
       if (decision.mode === "steer") {
         hop.steerTurn(sessionID, m.hop, fromOperator)
         const ok = await inject(sessionID, text, "steer")
-        inbox.add(sessionID, m, !ok)
+        store(sessionID, m, !ok)
         return
       }
       if (decision.countsAgainstBudget) budget.consume(now)
@@ -707,7 +734,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
         hop.endTurn(sessionID)
         queueState(sessionID)
       }
-      inbox.add(sessionID, m, !ok)
+      store(sessionID, m, !ok)
     } finally {
       if (m.msgid !== "") inflight.delete(m.msgid)
     }
@@ -1070,6 +1097,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     claims,
     options,
     onChannelsChanged: (sessionID: string) => registry.persist(sessionID),
+    redeliver,
   }
   registrations.push(await (deps.registerTools ?? registerTools)(ctx, toolDeps))
 

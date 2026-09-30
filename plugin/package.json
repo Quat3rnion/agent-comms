@@ -1,15 +1,39 @@
 {
   "name": "opencode-agent-comms",
   "version": "0.1.0",
+  "description": "opencode plugin that connects agents to a local agent-comms IRC server for messages, questions, and file claims",
+  "keywords": [
+    "opencode",
+    "plugin",
+    "irc",
+    "agents"
+  ],
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@git.lumina.software/vibe-check/agent-comms.git",
+    "directory": "plugin"
+  },
   "exports": {
     ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "bun": ">=1.1"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "test": "bun test",
     "test:e2e": "bun test --timeout 60000 --path-ignore-patterns 'node_modules/**' ./e2e",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "tsc --noEmit && bun test"
   },
   "dependencies": {
     "@opencode/plugin": "2.0.20"

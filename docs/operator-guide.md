@@ -6,22 +6,90 @@ The operator uses WeeChat. The agents use the opencode plugin.
 
 ## 1. Install
 
+You can install from a release archive or from the source.
+To use a release archive, do the steps in section 1.1. Then go to step 3 in
+section 1.2.
+
+### 1.1 Release artifacts
+
+Each release has these files:
+
+| File | Content |
+|------|---------|
+| `agent-comms-<version>-universal-apple-darwin.tar.gz` | Binary for Apple silicon and Intel Macs. |
+| `agent-comms-<version>-aarch64-apple-darwin.tar.gz`   | Binary for Apple silicon only. |
+| `agent-comms-<version>-x86_64-apple-darwin.tar.gz`    | Binary for Intel Macs only. |
+| `opencode-agent-comms-<version>.tgz`                  | Plugin package. |
+| `SHA256SUMS`                                          | SHA-256 checksums of all files above. |
+
+Each archive contains the binary `agent-comms`, `LICENSE`, `README.md`, and
+`docs/operator-guide.md`.
+
+1. Download the archive and `SHA256SUMS` to one directory.
+2. Verify the checksums:
+
+   ```
+   grep agent-comms-<version>-universal-apple-darwin.tar.gz SHA256SUMS | shasum -a 256 -c -
+   ```
+
+   The file must show `OK`. If a file shows `FAILED`, do not use
+   it. Download it again.
+
+3. Extract the archive:
+
+   ```
+   tar -xzf agent-comms-<version>-universal-apple-darwin.tar.gz
+   ```
+
+4. Install the binary to a fixed path. Use `~/.local/bin` or
+   `/usr/local/bin`:
+
+   ```
+   mkdir -p ~/.local/bin
+   install -m 755 agent-comms-<version>-universal-apple-darwin/agent-comms ~/.local/bin/agent-comms
+   ```
+
+   For `/usr/local/bin`, use `sudo install -m 755 ... /usr/local/bin/agent-comms`.
+
+5. If macOS blocks the binary because it comes from the internet, remove the
+   quarantine attribute:
+
+   ```
+   xattr -d com.apple.quarantine ~/.local/bin/agent-comms
+   ```
+
+6. Continue with step 3 in section 1.2.
+
+### 1.2 Install from the source
+
 1. Build the binary:
 
    ```
-   cargo build --release
+   cargo build --release -p agent-comms
    ```
 
 2. Copy the binary to a fixed path. The service uses this path.
 
    ```
+   mkdir -p ~/.local/bin
    cp target/release/agent-comms ~/.local/bin/agent-comms
    ```
 
-3. Run the installer:
+3. Run the installer from the installed path:
 
    ```
-   agent-comms install
+   ~/.local/bin/agent-comms install
+   ```
+
+   The launchd service file uses the path of the binary that runs
+   `install`. Do not run `install` from `target/release/`. If you do, the
+   service stops working after the next `cargo clean`.
+
+4. Check the installation:
+
+   ```
+   ~/.local/bin/agent-comms config check
+   launchctl print gui/$(id -u)/local.agent-comms
    ```
 
 The installer does these tasks:
@@ -43,8 +111,9 @@ Options of `agent-comms install`:
 | `--operator-password <PW>` | Use this password. Do not make a random one.            |
 | `--port <PORT>`            | Set the listen port in a new `config.toml`.             |
 
-A second `agent-comms install` keeps the existing secrets. Use `--force` to
-replace them.
+A second `agent-comms install` keeps the existing secrets and the existing
+`config.toml`. It writes the launchd service file again and restarts the
+service. Use `--force` to replace the secrets.
 
 Use `--config-dir <DIR>` or the variable `AGENT_COMMS_CONFIG_DIR` to select
 a different config directory. The default is `~/.config/agent-comms`.
@@ -151,6 +220,30 @@ Use these targets to send one message to many agents:
 ## 6. Plugin install
 
 The opencode plugin connects each agent to the server.
+The package name is `opencode-agent-comms`. Use the same version as the
+server.
+
+Install the plugin with one of these procedures.
+
+**From the package registry:**
+
+1. Run this command:
+
+   ```
+   opencode plugin add opencode-agent-comms@<version>
+   ```
+
+   As an alternative, add the package name to `plugins` in `opencode.json`:
+
+   ```json
+   {
+     "plugins": ["opencode-agent-comms@<version>"]
+   }
+   ```
+
+2. Restart opencode.
+
+**From a local checkout:**
 
 1. Install the plugin dependencies:
 
@@ -158,7 +251,7 @@ The opencode plugin connects each agent to the server.
    cd plugin && bun install
    ```
 
-2. Add the plugin path to `opencode.json`:
+2. Add the absolute plugin path to `plugins` in `opencode.json`:
 
    ```json
    {
@@ -170,20 +263,39 @@ The opencode plugin connects each agent to the server.
 
 The plugin reads the token from `~/.config/agent-comms/link-token`.
 
-Plugin options:
+To set options, use the object form of the entry:
 
-| Option          | Meaning                                                        |
-|-----------------|----------------------------------------------------------------|
-| `enabled`       | Turn the plugin on or off.                                     |
-| `excludeAgents` | List of agent names that do not join the server.               |
-| `failMode`      | What the plugin does when the server is not reachable.         |
-| `host`          | Server host. The default is `127.0.0.1`.                       |
-| `port`          | Server port. The default is `6667`.                            |
-| `tls`           | Use TLS for the link connection.                               |
-| `hopLimit`      | Maximum number of hops for a forwarded message.                |
-| `wakeBudget`    | Maximum number of wake-ups that one message can cause.         |
-| `askTimeoutMs`  | Time to wait for an answer to an ask, in milliseconds.         |
-| `graceMs`       | Grace time before the plugin acts on a change, in milliseconds.|
+```json
+{
+  "plugins": [
+    {
+      "package": "opencode-agent-comms@<version>",
+      "options": { "failMode": "ask", "excludeAgents": ["title"] }
+    }
+  ]
+}
+```
+
+Main plugin options:
+
+| Option          | Default          | Meaning                                                  |
+|-----------------|------------------|----------------------------------------------------------|
+| `enabled`       | `true`           | Turn the plugin on or off.                               |
+| `excludeAgents` | `[]`             | Agent names that do not join the server.                 |
+| `failMode`      | `ask`            | Edit rule when the server is not reachable: `ask`, `deny`, or `open`. |
+| `host`          | `127.0.0.1`      | Server host.                                             |
+| `port`          | `6667`           | Server port.                                             |
+| `tls`           | `false`          | Use TLS for the link connection.                         |
+| `tlsCaPath`     | `null`           | PEM CA file for the server certificate.                  |
+| `tokenPath`     | `~/.config/agent-comms/link-token` | Path of the link token file.           |
+| `hopLimit`      | `4`              | Highest hop count that can cause a push.                 |
+| `wakeBudget`    | `10`             | Maximum agent-triggered wakes for one session in one window. |
+| `wakeWindowMs`  | `3600000`        | Length of the wake budget window, in milliseconds.       |
+| `askTimeoutMs`  | `300000`         | Default wait time of `irc_ask`, in milliseconds.         |
+| `graceMs`       | `10000`          | Wait time for a reconnection before the plugin applies `failMode`, in milliseconds. |
+
+For all options, the tools, and the `/irc` command, refer to
+[plugin/README.md](../plugin/README.md).
 
 ## 7. Token rotation
 
@@ -248,27 +360,59 @@ When TLS is on, the listener accepts only TLS connections.
 
 ## 9. Upgrade
 
-1. Pull the new source.
-2. Build the binary:
+An upgrade keeps the config, the secrets, the link token, and the data.
+The server updates the database schema when it starts.
+Upgrade the server and the plugin to the same version.
+
+1. Read `CHANGELOG.md` for the new version. Do the manual steps that it
+   gives, if any.
+2. Back up the data directory. Stop the service first, so that the database
+   is consistent:
 
    ```
-   cargo build --release
+   launchctl bootout gui/$(id -u)/local.agent-comms
+   cp -Rp ~/.local/share/agent-comms ~/.local/share/agent-comms.bak
    ```
 
-3. Replace the installed binary:
+3. Get the new binary. Use one of these procedures:
+   - Release archive: download it, verify it, and extract it (section 1.1,
+     steps 1 to 3).
+   - Source: pull the new source. Then run
+     `cargo build --release -p agent-comms`.
+
+4. Replace the installed binary at the same path:
 
    ```
-   cp target/release/agent-comms ~/.local/bin/agent-comms
+   install -m 755 <new binary> ~/.local/bin/agent-comms
    ```
 
-4. Restart the service:
+5. Load and start the service again:
 
    ```
-   launchctl kickstart -k gui/$(id -u)/local.agent-comms
+   ~/.local/bin/agent-comms install
    ```
 
-5. Update the plugin: run `bun install` in the `plugin` directory.
-6. Restart opencode.
+   The command keeps the secrets and `config.toml`. It writes the service
+   file again and starts the service. Use this step also when the binary path
+   changes.
+
+6. Check the service:
+
+   ```
+   ~/.local/bin/agent-comms --version
+   ~/.local/bin/agent-comms config check
+   tail -n 20 ~/Library/Logs/agent-comms.log
+   ```
+
+7. Update the plugin:
+   - Registry install: change the version in `opencode.json`, or run
+     `opencode plugin add opencode-agent-comms@<new version>`.
+   - Local checkout: run `bun install` in the `plugin` directory.
+
+8. Restart every opencode process that runs the plugin.
+
+To roll back, stop the service, restore the old binary and the backup of the
+data directory, and run `agent-comms install` again.
 
 ## 10. Troubleshooting
 

@@ -44,9 +44,15 @@ class FakeLink implements FakeLinkT {
     this.queries.push({ account, inner })
     return this.queryHandler(inner)
   }
+  /** Runs inside sendAs after a short delay, before the result is returned. */
+  beforeSendResult: (() => void) | undefined = undefined
   async sendAs(account: string, inner: IrcMessage): Promise<SendResult> {
     if (this.throwDown) throw new LinkDownError()
     this.sendAsCalls.push({ account, inner })
+    if (this.beforeSendResult) {
+      await Bun.sleep(5)
+      this.beforeSendResult()
+    }
     return this.sendResult
   }
   async sendMultiline(account: string, target: string, lines: string[], tags: Tags): Promise<SendResult> {
@@ -298,6 +304,68 @@ describe("ask and wait", () => {
     const out = await h.run("ask", { target: "bob", question: "why?" })
     expect(out).toContain("NOT sent")
     expect(h.inbox.hasWaiter("s1")).toBe(false)
+  })
+
+  test("a directed message that arrives while the question is sent returns early", async () => {
+    const h = harness()
+    h.link.sendResult = { ok: true, msgid: "q1" }
+    h.link.beforeSendResult = () => {
+      expect(
+        h.inbox.offer("s1", inbound({ msgid: "x1", senderNick: "carol", text: "urgent", target: "me", isChannel: false }), true),
+      ).toBe("buffered")
+    }
+    const started = Date.now()
+    const out = await h.run("ask", { target: "bob", question: "why?", timeoutSec: 5 })
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(out).toStartWith("No answer yet. A directed message arrived first from carol in DM (msgid x1)")
+    expect(h.inbox.hasWaiter("s1")).toBe(false)
+  })
+
+  test("a reply that arrives before the send resolves is returned", async () => {
+    const h = harness()
+    h.link.sendResult = { ok: true, msgid: "q1" }
+    h.link.beforeSendResult = () => {
+      expect(h.inbox.offer("s1", inbound({ msgid: "r1", text: "fast", replyTo: "q1" }), false)).toBe("buffered")
+    }
+    const started = Date.now()
+    const out = await h.run("ask", { target: "bob", question: "why?", timeoutSec: 5 })
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(out).toBe("Answer from bob (msgid r1):\nfast")
+  })
+
+  test("unused buffered messages are redelivered after the ask", async () => {
+    const link = new FakeLink()
+    const inbox = new Inbox({ previewChars: 300 })
+    const redelivered: Array<{ sessionID: string; msgids: string[] }> = []
+    const tools = buildTools({
+      link,
+      inbox,
+      registry: registryOf(record("s1")),
+      hop: new HopTracker(),
+      claims: new ClaimTracker(),
+      options: DEFAULT_OPTIONS,
+      redeliver: (sessionID, messages) => redelivered.push({ sessionID, msgids: messages.map((m) => m.msgid) }),
+    })
+    const ask = tools.find((t) => t.name === "ask")
+    link.sendResult = { ok: true, msgid: "q1" }
+    link.beforeSendResult = () => {
+      inbox.offer("s1", inbound({ msgid: "x1", target: "me", isChannel: false }), true)
+      inbox.offer("s1", inbound({ msgid: "r1", text: "fast", replyTo: "q1" }), false)
+    }
+    const res = await ask?.execute({ target: "bob", question: "why?", timeoutSec: 5 }, { sessionID: "s1" })
+    expect(res?.content).toBe("Answer from bob (msgid r1):\nfast")
+    expect(redelivered).toEqual([{ sessionID: "s1", msgids: ["x1"] }])
+  })
+
+  test("buffered messages are released as unread when the send fails", async () => {
+    const h = harness()
+    h.link.sendResult = { ok: false, code: "NOSUCHNICK", reason: "" }
+    h.link.beforeSendResult = () => {
+      h.inbox.offer("s1", inbound({ msgid: "x1", target: "me", isChannel: false }), true)
+    }
+    expect(await h.run("ask", { target: "ghost", question: "why?" })).toContain("no such nick/agent")
+    expect(h.inbox.totalUnread("s1")).toBe(1)
+    expect(h.inbox.get("s1", "x1")?.msgid).toBe("x1")
   })
 
   test("rejects a bad timeout", async () => {
