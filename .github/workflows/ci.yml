@@ -60,12 +60,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # run.sh puts a Python venv under target/irctest; do not cache target/.
           cache-targets: false
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - run: tests/irctest/run.sh
+      # run.sh puts a Python venv under target/irctest. Remove it so that the
+      # rust-cache post step does not scan it.
+      - if: always()
+        run: rm -rf target/irctest
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
