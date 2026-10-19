@@ -1360,7 +1360,7 @@ class IrcClient {
         host: config.host,
         port: config.port,
         ca: config.ca,
-        servername: /^[\d.:]+$/.test(config.host) ? "localhost" : config.host
+        servername: net.isIP(config.host) ? /^(127\.|::1$)/.test(config.host) ? "localhost" : undefined : config.host
       }) : net.connect({ host: config.host, port: config.port });
       this.socket = socket;
       socket.setEncoding("utf8");

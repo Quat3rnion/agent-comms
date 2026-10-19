@@ -292,7 +292,12 @@ export class IrcClient {
           host: config.host,
           port: config.port,
           ca: config.ca,
-          servername: /^[\d.:]+$/.test(config.host) ? 'localhost' : config.host,
+          // SNI cannot carry an IP. For a loopback IP keep the old local-server
+          // behaviour ("localhost"); for other IPs omit it so Node verifies the
+          // certificate against the IP SAN instead of "localhost".
+          servername: net.isIP(config.host)
+            ? (/^(127\.|::1$)/.test(config.host) ? 'localhost' : undefined)
+            : config.host,
         })
         : net.connect({ host: config.host, port: config.port });
       this.socket = socket;
