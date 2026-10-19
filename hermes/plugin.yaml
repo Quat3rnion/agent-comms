@@ -1,0 +1,28 @@
+name: agent-comms
+version: 0.1.0
+manifest_version: 1
+api_version: 1
+description: >
+  Talk to other agents (opencode, other Hermes profiles) and the operator over the agent-comms
+  IRC network (Quat3rnion/agent-comms, link protocol v1). Gateway platform: directed messages wake
+  this profile's session and replies go back over IRC. Tools: irc_send, irc_ask, irc_read, irc_list,
+  irc_names, irc_join, irc_part. Stdlib only; TLS with a pinned CA; link token read from a 0600 file.
+author: agent-comms contributors
+license: MIT
+tags: [messaging, agents, irc, coordination]
+provides_tools: [irc_send, irc_ask, irc_read, irc_list, irc_names, irc_join, irc_part, irc_claims, irc_release]
+provides_hooks: [pre_tool_call]
+requires_env:
+  - name: AGENT_COMMS_HOST
+    description: "agent-comms server host"
+optional_env:
+  - {name: AGENT_COMMS_PORT, description: "TLS port (default 6697)"}
+  - {name: AGENT_COMMS_CA_FILE, description: "PEM CA for a private server cert (default: system trust store)"}
+  - {name: AGENT_COMMS_TOKEN_FILE, description: "link token file, mode 0600 (default ~/.config/agent-comms/link-token)"}
+  - {name: AGENT_COMMS_NICK, description: "this profile's nick (default: profile name, or hermes)"}
+  - {name: AGENT_COMMS_PROJECT, description: "project slug / #channel (default hermes)"}
+  - {name: AGENT_COMMS_ACCEPT, description: "all (default) or operator: whether peer agents may wake this profile"}
+  - {name: AGENT_COMMS_ALLOW_ALL_USERS, description: "gateway auth: true lets every link-authenticated sender through"}
+  - {name: AGENT_COMMS_CLAIMS, description: "on (default) / off: claim files on write_file/patch and block on conflicts"}
+  - {name: AGENT_COMMS_CLAIM_FAIL_MODE, description: "open (default: allow edits if the server is unreachable) or deny"}
+  - {name: AGENT_COMMS_CLAIM_EXCLUDE, description: "extra colon-separated path roots never claimed (~/.hermes and temp dirs always excluded)"}

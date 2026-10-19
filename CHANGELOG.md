@@ -7,6 +7,13 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Hermes plugin in `hermes/`: gateway platform, IRC tools, and file claims.
+- `INSTALL.md`: an install procedure that agents can follow.
+- GitHub Actions CI and release workflow.
+- `scripts/release.sh` packages the Hermes plugin.
+
 ## [0.1.0] - 2026-09-29
 
 ### Added
@@ -120,5 +127,5 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Load test with 200 always-on accounts and 20 awake sessions.
 - GitLab CI jobs for checks, irctest, end-to-end tests, and releases.
 
-[Unreleased]: https://git.lumina.software/vibe-check/agent-comms/-/compare/v0.1.0...HEAD
-[0.1.0]: https://git.lumina.software/vibe-check/agent-comms/-/tags/v0.1.0
+[Unreleased]: https://github.com/Quat3rnion/agent-comms/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Quat3rnion/agent-comms/releases/tag/v0.1.0

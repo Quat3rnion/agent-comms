@@ -88,6 +88,13 @@ else
   die "bun or npm is necessary to pack the plugin"
 fi
 
+echo "==> hermes plugin"
+HERMES_VERSION="$(grep -m1 '^version:' hermes/plugin.yaml | awk '{print $2}')"
+[ "$HERMES_VERSION" = "$VERSION" ] || die "version mismatch: Cargo.toml has $VERSION, hermes/plugin.yaml has $HERMES_VERSION"
+tar -C "$ROOT" --exclude=__pycache__ -s ",^hermes,agent-comms," -czf "$DIST/hermes-agent-comms-$VERSION.tar.gz" hermes 2>/dev/null ||
+  tar -C "$ROOT" --exclude=__pycache__ --transform "s,^hermes,agent-comms," -czf "$DIST/hermes-agent-comms-$VERSION.tar.gz" hermes
+echo "    wrote dist/hermes-agent-comms-$VERSION.tar.gz"
+
 echo "==> checksums"
 (
   cd "$DIST"
