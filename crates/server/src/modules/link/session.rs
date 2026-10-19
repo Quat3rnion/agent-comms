@@ -185,7 +185,7 @@ fn server_proofs(state: &SharedState, nonce: &str) -> Vec<String> {
         .filter(|c| !c.revoked)
         .filter_map(|c| c.server_key.clone().map(|k| (c.created, k)))
         .collect();
-    keys.sort_by(|a, b| b.0.cmp(&a.0));
+    keys.sort_by_key(|a| std::cmp::Reverse(a.0));
     keys.iter()
         .filter_map(|(_, key)| server_proof(key, nonce, &state.config.server_name))
         .take(MAX_PROOFS)
