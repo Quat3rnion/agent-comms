@@ -3,9 +3,9 @@
  * context text, claims, and the /irc command.
  */
 import { createHash } from "node:crypto"
-import { appendFileSync, realpathSync } from "node:fs"
+import { appendFileSync, mkdirSync, realpathSync } from "node:fs"
 import { hostname } from "node:os"
-import { resolve } from "node:path"
+import { dirname, resolve } from "node:path"
 import { Plugin } from "@opencode/plugin"
 import { handleAgentRequest } from "./agent.ts"
 import type { AgentDeps } from "./agent.ts"
@@ -32,6 +32,7 @@ import {
   classify,
   decide,
   decodeInbound,
+  isFamily,
   wrap,
 } from "./delivery.ts"
 import { Inbox } from "./inbox.ts"
@@ -86,15 +87,32 @@ export interface Runtime {
 
 const PREFIX = "[agent-comms]"
 
-/** Log file for plugin diagnostics (AGENT_COMMS_PLUGIN_LOG overrides; "" disables). */
-const LOG_FILE =
-  process.env["AGENT_COMMS_PLUGIN_LOG"] ?? `${process.env["HOME"] ?? "."}/Library/Logs/agent-comms-plugin.log`
+/**
+ * Log file for plugin diagnostics. AGENT_COMMS_PLUGIN_LOG overrides it; "" disables it.
+ * macOS: ~/Library/Logs. Other systems: $XDG_STATE_HOME/agent-comms (default ~/.local/state).
+ */
+export function defaultLogFile(env: Record<string, string | undefined>, platform: string): string {
+  const override = env["AGENT_COMMS_PLUGIN_LOG"]
+  if (override !== undefined) return override
+  const home = env["HOME"] ?? "."
+  if (platform === "darwin") return `${home}/Library/Logs/agent-comms-plugin.log`
+  const xdg = env["XDG_STATE_HOME"]
+  const state = xdg !== undefined && xdg !== "" ? xdg : `${home}/.local/state`
+  return `${state}/agent-comms/plugin.log`
+}
+
+const LOG_FILE = defaultLogFile(process.env, process.platform)
+let logDirReady = false
 
 function defaultLog(level: LogLevel, message: string): void {
   if (level === "warn") console.warn(`${PREFIX} ${message}`)
   else if (level === "error") console.error(`${PREFIX} ${message}`)
   if (LOG_FILE === "" || level === "debug") return
   try {
+    if (!logDirReady) {
+      mkdirSync(dirname(LOG_FILE), { recursive: true })
+      logDirReady = true
+    }
     appendFileSync(LOG_FILE, `${new Date().toISOString()} pid=${process.pid} ${level} ${message}\n`)
   } catch {
     // Logging must never break the plugin.
@@ -672,7 +690,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
       })
       return true
     } catch (e) {
-      log("warn", `cannot deliver message to session ${sessionID}: ${errText(e)}`)
+      log("warn", `cannot deliver message to session ${sessionID} (${delivery ?? "wake"}): ${errText(e)}`)
       return false
     } finally {
       injected.delete(text)
@@ -766,6 +784,12 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
       addressed: addressedDirectly(m, me),
     })
 
+    const why = decision.kind === "unread" ? decision.reason : decision.mode
+    log(
+      "info",
+      `deliver session=${sessionID} msgid=${m.msgid || "-"} from=${m.senderNick} rel=${m.rel} ` +
+        `in=${m.isChannel ? m.target : "DM"} hop=${m.hop} busy=${rec.busy} -> ${decision.kind} ${why}`,
+    )
     if (decision.kind === "unread") {
       if (decision.reason === "hop-limit") hopBlocked.set(sessionID, (hopBlocked.get(sessionID) ?? 0) + 1)
       store(sessionID, m, true)
@@ -782,7 +806,9 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     if (m.msgid !== "") inflight.add(m.msgid)
     try {
       if (decision.mode === "steer") {
-        hop.steerTurn(sessionID, m.hop, fromOperator)
+        // A family steer does not raise the hop: else every parent-subagent round trip
+        // in one long turn adds 2, and the third one goes over the limit.
+        if (!isFamily(m)) hop.steerTurn(sessionID, m.hop, fromOperator)
         const ok = await inject(sessionID, text, "steer")
         store(sessionID, m, !ok)
         if (!ok) hold(sessionID, m, "delivery failed")

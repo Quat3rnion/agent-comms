@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import type { Plugin } from "@opencode/plugin"
-import { createRuntime, normalizeEvent } from "../src/index.ts"
+import { createRuntime, defaultLogFile, normalizeEvent } from "../src/index.ts"
 import type { LinkLike, Runtime } from "../src/index.ts"
 import type { IrcMessage, Tags } from "../src/proto.ts"
 import { msg, vendorTag } from "../src/proto.ts"
@@ -263,16 +263,19 @@ async function boot(
   const link = new FakeLink()
   if (o.connected !== false) link.state = "established"
   const h = makeCtx(o.options ?? {}, o.sessions ?? {})
+  const logs: string[] = []
   const rt = await createRuntime(h.ctx, {
     link: link as unknown as LinkLike,
     now: () => NOW,
-    log: () => {},
+    log: (level, message) => {
+      logs.push(`${level} ${message}`)
+    },
     realpath: o.realpath ?? (() => null),
     registerTools: async () => ({ dispose: async () => {} }),
   })
   if (rt === null) throw new Error("runtime is disabled")
   live.push(rt)
-  return { rt, link, h }
+  return { rt, link, h, logs }
 }
 
 const created = (id: string, over: Record<string, unknown> = {}) => ({
@@ -642,6 +645,32 @@ describe("inbound delivery", () => {
     expect(rt.hopBlockedCount("ses_a")).toBe(1)
   })
 
+  test("parent and subagent can steer each other past the hop limit without raising the hop", async () => {
+    const { rt, link, h } = await bootWithSession()
+    link.deliver("ses_a", priv({ hop: 2 }))
+    await rt.settle()
+    expect(rt.hop.outgoingHop("ses_a")).toBe(3)
+    for (let i = 0; i < 6; i++) {
+      link.deliver("ses_a", priv({ hop: 9 + i, rel: "descendant", senderNick: "fix-auth|task1", msgid: `fam${i}` }))
+    }
+    await rt.settle()
+    expect(h.prompts).toHaveLength(7)
+    expect(h.prompts[6]?.["delivery"]).toBe("steer")
+    expect(rt.hop.outgoingHop("ses_a")).toBe(3)
+    expect(rt.hopBlockedCount("ses_a")).toBe(0)
+  })
+
+  test("logs each delivery decision with its reason", async () => {
+    const { rt, link, logs } = await bootWithSession()
+    link.deliver("ses_a", priv({ hop: 5, msgid: "lg1" }))
+    link.deliver("ses_a", priv({ msgid: "lg2" }))
+    await rt.settle()
+    const lines = logs.filter((l) => l.includes("deliver session=ses_a"))
+    expect(lines[0]).toContain("info deliver session=ses_a msgid=lg1 from=bob rel=peer in=DM hop=5 busy=false -> unread hop-limit")
+    expect(lines[1]).toContain("msgid=lg2")
+    expect(lines[1]).toContain("-> push wake")
+  })
+
   test("the operator bypasses the wake budget", async () => {
     const { rt, link, h } = await bootWithSession({ options: { wakeBudget: 0 } })
     link.deliver("ses_a", priv({ text: "peer ping" }))
@@ -784,7 +813,7 @@ describe("context hook", () => {
 
   test("names a directed message that was held back until it is read", async () => {
     const { rt, link, h } = await bootWithSession({ options: { wakeBudget: 0 } })
-    link.deliver("ses_a", priv({ hop: 5, msgid: "held1", senderNick: "fix-auth|task1", rel: "descendant" }))
+    link.deliver("ses_a", priv({ hop: 5, msgid: "held1", senderNick: "carol" }))
     link.deliver("ses_a", priv({ msgid: "held2" }))
     link.deliver("ses_a", priv({ target: "#lobby", text: "chatter", msgid: "chat1" }))
     await rt.settle()
@@ -793,7 +822,7 @@ describe("context hook", () => {
     const ev = { sessionID: "ses_a", system: [] as unknown[] }
     await h.hooks.context[0]?.(ev)
     const text = (ev.system[0] as { text: string }).text
-    expect(text).toContain("fix-auth|task1 in DM (msgid held1; hop limit)")
+    expect(text).toContain("carol in DM (msgid held1; hop limit)")
     expect(text).toContain("bob in DM (msgid held2; wake budget)")
     expect(text).not.toContain("chat1")
 
@@ -1172,5 +1201,16 @@ describe("AGENT requests", () => {
     link.emit("line", msg("AGENT", ["r4", "STATUS", "ses_nope"]))
     await rt.settle()
     expect(link.sent.map((m) => m.command)).toEqual(["FAIL", "AGENTEND"])
+  })
+})
+
+describe("plugin log file", () => {
+  test("uses the platform log folder and honours the override", () => {
+    expect(defaultLogFile({ HOME: "/h" }, "darwin")).toBe("/h/Library/Logs/agent-comms-plugin.log")
+    expect(defaultLogFile({ HOME: "/h" }, "linux")).toBe("/h/.local/state/agent-comms/plugin.log")
+    expect(defaultLogFile({ HOME: "/h", XDG_STATE_HOME: "/s" }, "linux")).toBe("/s/agent-comms/plugin.log")
+    expect(defaultLogFile({ HOME: "/h", XDG_STATE_HOME: "" }, "linux")).toBe("/h/.local/state/agent-comms/plugin.log")
+    expect(defaultLogFile({ HOME: "/h", AGENT_COMMS_PLUGIN_LOG: "" }, "linux")).toBe("")
+    expect(defaultLogFile({ HOME: "/h", AGENT_COMMS_PLUGIN_LOG: "/x.log" }, "darwin")).toBe("/x.log")
   })
 })

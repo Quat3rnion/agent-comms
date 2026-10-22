@@ -349,6 +349,18 @@ describe("decide", () => {
       reason: "hop-limit",
     })
   })
+  test("e2: family messages ignore the hop limit but not the wake budget", () => {
+    for (const rel of ["ancestor", "descendant"] as const) {
+      expect(decide({ ...base(), m: inbound({ hop: 50, rel }), busy: true }).kind).toBe("push")
+      expect(decide({ ...base(), m: inbound({ hop: 50, rel }) })).toEqual({
+        kind: "push",
+        mode: "wake",
+        countsAgainstBudget: true,
+      })
+      const budget = new WakeBudget(0, 1000)
+      expect(decide({ ...base(), budget, m: inbound({ hop: 50, rel }) })).toEqual({ kind: "unread", reason: "budget" })
+    }
+  })
   test("f: busy steers without budget", () => {
     const budget = new WakeBudget(1, 1000)
     budget.consume(0)

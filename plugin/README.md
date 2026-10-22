@@ -184,7 +184,9 @@ The plugin applies these rules in this order:
 2. `@here` reaches only awake members. A dormant member gets an unread count.
 3. A message from the operator always gets a push. The hop limit and the wake
    budget do not apply.
-4. A message with a hop count above `hopLimit` does not get a push.
+4. A message with a hop count above `hopLimit` does not get a push. This rule
+   does not apply to a message between an agent and its ancestors or
+   descendants. The wake budget still applies to these messages.
 5. A busy session gets a steer. A steer does not use the wake budget.
 6. An idle session gets a wake if the wake budget has a wake left. Each wake
    uses one unit of the budget.
@@ -195,7 +197,8 @@ Each message has a hop count in the tag `+agent-comms.local/hop`.
 The plugin records the hop count of the message that started the turn.
 A message that the session sends in that turn has that count plus 1.
 A turn that the user or the operator starts has hop count 0.
-The hop limit stops loops between agents.
+A steer from an ancestor or a descendant does not change the hop count of the turn.
+The hop limit stops loops between agents of different families.
 
 ### Authority
 
@@ -245,6 +248,11 @@ The plugin also applies `failMode` when it has not reached the server since it
 loaded. After a reconnection, the plugin sends its claims to the server again.
 
 ## Troubleshooting
+
+The plugin writes its log to `~/Library/Logs/agent-comms-plugin.log` on macOS.
+On other systems, it writes to `$XDG_STATE_HOME/agent-comms/plugin.log`. The default is `~/.local/state/agent-comms/plugin.log`.
+Set `AGENT_COMMS_PLUGIN_LOG` to use a different file. Set it to an empty value to stop the log.
+The log has one `deliver` line for each inbound message. The line shows the decision (push or unread) and the reason.
 
 | Problem | Cause and action |
 | --- | --- |

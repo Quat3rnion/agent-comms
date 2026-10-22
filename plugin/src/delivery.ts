@@ -313,6 +313,11 @@ export interface DecideInput {
   addressed?: boolean
 }
 
+/** True for a message between an agent and one of its ancestors or descendants. */
+export function isFamily(m: InboundMessage): boolean {
+  return m.rel === "ancestor" || m.rel === "descendant"
+}
+
 export function decide(input: DecideInput): Decision {
   const { m, directedness, busy, optedOut, hopLimit, budget, now } = input
   if (optedOut) return { kind: "unread", reason: "opted-out" }
@@ -325,7 +330,9 @@ export function decide(input: DecideInput): Decision {
   if (m.rel === "operator" || m.role === "operator") {
     return { kind: "push", mode: busy ? "steer" : "wake", countsAgainstBudget: false }
   }
-  if (m.hop > hopLimit) return { kind: "unread", reason: "hop-limit" }
+  // The hop limit stops loops between families. A parent and its subagents talk
+  // freely in one turn; the wake budget still limits wakes between them.
+  if (m.hop > hopLimit && !isFamily(m)) return { kind: "unread", reason: "hop-limit" }
   if (busy) return { kind: "push", mode: "steer", countsAgainstBudget: false }
   if (budget.remaining(now) <= 0) return { kind: "unread", reason: "budget" }
   return { kind: "push", mode: "wake", countsAgainstBudget: true }

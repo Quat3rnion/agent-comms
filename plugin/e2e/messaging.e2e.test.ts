@@ -499,6 +499,72 @@ describe("busy_session_gets_steer", () => {
 })
 
 // ---------------------------------------------------------------------------
+// 3b. steer_at_turn_end
+// ---------------------------------------------------------------------------
+
+describe("steer_at_turn_end", () => {
+  let env: Env | undefined
+
+  beforeAll(async () => {
+    env = await startEnv()
+  }, 60_000)
+
+  afterAll(async () => {
+    await env?.stop()
+  }, 30_000)
+
+  test(
+    "a steer that arrives during the final step of a turn still reaches the model",
+    async () => {
+      await withDiagnostics(env, async () => {
+        const e = env as Env
+        const GO = "LAST-STEP-GO"
+        const STEER = "one more thing from your parent"
+        const gate = createGate()
+
+        let held = false
+        e.model.script(
+          tagged("edge"),
+          [
+            async (r): Promise<Step> => {
+              // The final answer of the turn (text only, no tool call) is held open.
+              if (r.lastUser.includes(GO) && !r.allText.includes(STEER) && !held) {
+                held = true
+                await gate.wait
+              }
+              return { text: "done" }
+            },
+          ],
+          { repeatLast: true },
+        )
+
+        const [id] = (await setupSessions(e, [{ tag: "edge", title: "Edge Target", nick: "edge-target" }])) as [
+          string,
+        ]
+        const mark = e.model.requests.length
+        await e.opencode.prompt(id, `${GO} answer briefly`, { tag: "edge" })
+        await e.model.waitForRequest(
+          (r) => r.index >= mark && r.kind === "primary" && r.tag === "edge" && r.lastUser.includes(GO),
+          20_000,
+        )
+        await sleep(700)
+        e.operator.privmsg("edge-target", STEER)
+        await sleep(2_000)
+        gate.open()
+
+        const delivered = await e.model.waitForRequest(
+          (r) => r.index >= mark && r.kind === "primary" && r.tag === "edge" && r.allText.includes(STEER),
+          30_000,
+        )
+        expect(delivered.allText).toContain("(operator) in DM")
+        await e.opencode.waitIdle(id, 30_000)
+      })
+    },
+    90_000,
+  )
+})
+
+// ---------------------------------------------------------------------------
 // 4. chatter_does_not_wake
 // ---------------------------------------------------------------------------
 
