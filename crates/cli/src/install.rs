@@ -1,7 +1,7 @@
 //! `agent-comms install`.
 
 use crate::cli::InstallArgs;
-use crate::{launchd, paths, secrets_file, token};
+use crate::{paths, secrets_file, service, token};
 use agent_comms_server::config::Config;
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
@@ -108,9 +108,9 @@ pub fn run(config_dir: &Path, args: &InstallArgs) -> Result<()> {
     }
 
     // Service.
-    if cfg!(target_os = "macos") && !args.no_launchd {
+    if cfg!(any(target_os = "macos", target_os = "linux")) && !args.no_launchd {
         let exe = std::env::current_exe()?;
-        launchd::install(&exe, &absolute(config_dir))?;
+        service::install(&exe, &absolute(config_dir))?;
     }
 
     print_summary(&config, generated_password.as_deref());

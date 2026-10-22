@@ -73,6 +73,173 @@ fn install_creates_files_with_private_modes() {
     assert!(!raw.contains(token.trim()));
 }
 
+#[cfg(target_os = "linux")]
+fn mock_systemctl(tmp: &TempDir) -> PathBuf {
+    let bin = tmp.path().join("bin");
+    fs::create_dir(&bin).unwrap();
+    let script = bin.join("systemctl");
+    fs::write(
+        &script,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$HOME/systemctl.log\"\nexit 0\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn install_and_uninstall_systemd_service_keep_data() {
+    let tmp = TempDir::new().unwrap();
+    let bin = mock_systemctl(&tmp);
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .arg("install")
+        .assert()
+        .success();
+    let unit = tmp
+        .path()
+        .join("xdg-config/systemd/user/agent-comms.service");
+    let text = fs::read_to_string(&unit).unwrap();
+    assert!(text.contains(&format!(
+        "ExecStart=\"{}\" serve --config-dir \"{}\"",
+        env!("CARGO_BIN_EXE_agent-comms"),
+        config_dir(&tmp).display()
+    )));
+    assert!(text.contains("Restart=on-failure\n"));
+    assert!(text.contains("StandardOutput=journal\n"));
+    assert!(text.contains("StandardError=journal\n"));
+    assert!(text.contains("WantedBy=default.target\n"));
+    let secrets = fs::read(config_dir(&tmp).join("secrets.toml")).unwrap();
+    let data = tmp.path().join("data/agent-comms/agent-comms.db");
+    fs::write(&data, "retained data").unwrap();
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .arg("uninstall")
+        .assert()
+        .success();
+    assert!(!unit.exists());
+    assert_eq!(
+        fs::read(config_dir(&tmp).join("secrets.toml")).unwrap(),
+        secrets
+    );
+    assert!(config_dir(&tmp).join("config.toml").exists());
+    assert!(config_dir(&tmp).join("link-token").exists());
+    assert_eq!(fs::read_to_string(data).unwrap(), "retained data");
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("systemctl.log")).unwrap(),
+        "--user daemon-reload\n--user enable --now agent-comms.service\n--user disable --now agent-comms.service\n--user daemon-reload\n"
+    );
+}
+
+#[test]
+fn install_service_opt_out_flags_skip_service() {
+    let tmp = TempDir::new().unwrap();
+    #[cfg(target_os = "linux")]
+    let bin = mock_systemctl(&tmp);
+    for flag in ["--no-service", "--no-launchd"] {
+        let mut command = cmd(&tmp);
+        #[cfg(target_os = "linux")]
+        command.env("PATH", &bin);
+        command.args(["install", flag]).assert().success();
+    }
+    assert!(!tmp.path().join("systemctl.log").exists());
+    assert!(!tmp
+        .path()
+        .join("xdg-config/systemd/user/agent-comms.service")
+        .exists());
+    assert!(!tmp
+        .path()
+        .join("Library/LaunchAgents/local.agent-comms.plist")
+        .exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn systemd_uses_home_when_xdg_config_home_is_unset() {
+    let tmp = TempDir::new().unwrap();
+    let bin = mock_systemctl(&tmp);
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .env_remove("XDG_CONFIG_HOME")
+        .arg("install")
+        .assert()
+        .success();
+    assert!(tmp
+        .path()
+        .join(".config/systemd/user/agent-comms.service")
+        .exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn token_rotate_signals_active_systemd_service_without_pid_file() {
+    let tmp = TempDir::new().unwrap();
+    let bin = mock_systemctl(&tmp);
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .arg("install")
+        .assert()
+        .success();
+    fs::write(tmp.path().join("systemctl.log"), "").unwrap();
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .args(["token", "rotate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Running service agent-comms.service notified",
+        ));
+    assert_eq!(
+        fs::read_to_string(tmp.path().join("systemctl.log")).unwrap(),
+        "--user is-active --quiet agent-comms.service\n--user kill --kill-who=main --signal=SIGHUP agent-comms.service\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn systemd_failures_warn_on_install_and_keep_unit_on_uninstall() {
+    let tmp = TempDir::new().unwrap();
+    let bin = mock_systemctl(&tmp);
+    fs::write(bin.join("systemctl"), "#!/bin/sh\nexit 1\n").unwrap();
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .arg("install")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("daemon-reload` failed"));
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .arg("uninstall")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("cannot stop and disable"));
+    assert!(tmp
+        .path()
+        .join("xdg-config/systemd/user/agent-comms.service")
+        .exists());
+    assert!(config_dir(&tmp).join("secrets.toml").exists());
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .args(["token", "rotate"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No running server found"));
+    fs::write(
+        bin.join("systemctl"),
+        "#!/bin/sh\n[ \"$2\" = daemon-reload ]\n",
+    )
+    .unwrap();
+    cmd(&tmp)
+        .env("PATH", &bin)
+        .arg("install")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "enable --now agent-comms.service` failed",
+        ));
+}
+
 #[test]
 fn install_uses_given_operator_password() {
     let tmp = TempDir::new().unwrap();

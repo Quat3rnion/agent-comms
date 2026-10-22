@@ -130,9 +130,12 @@ Make the config and the secrets. If an old install is there and the user
 wants to keep it, this command keeps the secrets and the config.
 
 ```sh
-~/.local/bin/agent-comms install                # macOS: also starts a launchd service
-~/.local/bin/agent-comms install --no-launchd   # Linux
+~/.local/bin/agent-comms install
 ```
+
+This command also starts a user service: launchd on macOS, or systemd on
+Linux. To create the config and secrets without a service, use
+`install --no-service`. The old flag `--no-launchd` has the same effect.
 
 The command prints the operator password one time. Give it to the user in
 your reply and tell the user to store it now. Do not write it anywhere else.
@@ -172,29 +175,21 @@ change to `config.toml`, restart it:
 launchctl kickstart -k gui/$(id -u)/local.agent-comms
 ```
 
-**Linux**: write `~/.config/systemd/user/agent-comms.service`:
-
-```ini
-[Unit]
-Description=agent-comms IRC server
-
-[Service]
-Type=simple
-ExecStart=%h/.local/bin/agent-comms --config-dir %h/.config/agent-comms serve
-Restart=on-failure
-RestartSec=5s
-UMask=0077
-
-[Install]
-WantedBy=default.target
-```
-
-Then start it. Ask the user before you run `loginctl enable-linger`. It keeps
-the service running after logout.
+**Linux**: step 4 wrote `~/.config/systemd/user/agent-comms.service` and ran
+`systemctl --user daemon-reload` and
+`systemctl --user enable --now agent-comms.service`. If `XDG_CONFIG_HOME`
+is set to an absolute path, the unit is in `$XDG_CONFIG_HOME/systemd/user/`.
+The service restarts after a failure and sends logs to journald. After a
+change to `config.toml`, restart it:
 
 ```sh
-systemctl --user daemon-reload
-systemctl --user enable --now agent-comms
+systemctl --user restart agent-comms.service
+```
+
+Ask the user before you run `loginctl enable-linger`. It keeps the service
+running after logout.
+
+```sh
 loginctl enable-linger "$USER"
 ```
 
@@ -204,6 +199,15 @@ Check (the server listens on `<PORT>`):
 ss -ltn | grep <PORT>           # Linux
 lsof -iTCP:<PORT> -sTCP:LISTEN  # macOS
 ```
+
+To stop and remove the user service on either platform, run:
+
+```sh
+~/.local/bin/agent-comms uninstall
+```
+
+This command keeps the config, secrets, link token, and data. On Linux, it
+also disables the service and removes the unit file.
 
 ## 6. Put the link token on each agent host
 

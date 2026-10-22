@@ -1,11 +1,19 @@
 mod cli;
 mod install;
+#[cfg(not(target_os = "linux"))]
 mod launchd;
 mod notify;
 mod paths;
 mod secrets_file;
 mod serve;
+#[cfg(target_os = "linux")]
+mod systemd;
 mod token;
+
+#[cfg(not(target_os = "linux"))]
+use launchd as service;
+#[cfg(target_os = "linux")]
+use systemd as service;
 
 use anyhow::{anyhow, Result};
 use clap::Parser;
@@ -24,7 +32,7 @@ async fn main() -> Result<()> {
             serve::run(&config_dir, args.config.as_deref(), args.log_format).await
         }
         Command::Install(args) => install::run(&config_dir, &args),
-        Command::Uninstall => launchd::uninstall(),
+        Command::Uninstall => service::uninstall(),
         Command::Token(cmd) => token::run(&config_dir, cmd),
         Command::OperatorPassword(args) => token::operator_password(&config_dir, &args),
         Command::Config(ConfigCmd::Check) => {

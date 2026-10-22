@@ -1,11 +1,11 @@
 //! Tell a running server to reload its secrets (SIGHUP).
 
-use crate::{launchd, paths};
+use crate::{paths, service};
 use agent_comms_server::config::Config;
 use std::process::{Command, Stdio};
 
 /// Send SIGHUP to the running server and print the result.
-/// First the pid file in the data directory, then the launchd service.
+/// First the pid file in the data directory, then the user service.
 pub fn reload_running_server(config: &Config) {
     match signal_pid_file(config) {
         Ok(Some(pid)) => {
@@ -15,11 +15,11 @@ pub fn reload_running_server(config: &Config) {
         Ok(None) => {}
         Err(e) => eprintln!("warning: {e}"),
     }
-    match launchd::signal_reload() {
+    match service::signal_reload() {
         Ok(true) => {
             println!(
                 "Running service {} notified. It uses the new secrets now.",
-                launchd::LABEL
+                service::LABEL
             );
         }
         Ok(false) => {

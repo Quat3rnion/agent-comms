@@ -27,9 +27,9 @@ pub struct Cli {
 pub enum Command {
     /// Run the server.
     Serve(ServeArgs),
-    /// Create config, secrets, link token and the launchd service.
+    /// Create config, secrets, link token and the user service.
     Install(InstallArgs),
-    /// Stop and remove the launchd service. Data stays.
+    /// Stop and remove the user service. Data stays.
     Uninstall,
     /// Manage link tokens.
     #[command(subcommand)]
@@ -62,8 +62,8 @@ pub struct InstallArgs {
     /// Replace existing secrets (operator password and all link tokens).
     #[arg(long)]
     pub force: bool,
-    /// Do not write or load the launchd service.
-    #[arg(long)]
+    /// Do not write or start the user service (launchd or systemd).
+    #[arg(long, visible_alias = "no-service")]
     pub no_launchd: bool,
     /// Read the operator password from the first line of stdin
     /// instead of a random one.
