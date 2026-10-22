@@ -141,6 +141,11 @@ export class Inbox {
     }
   }
 
+  /** True when the message is stored and still unread. */
+  isUnread(sessionID: string, msgid: string): boolean {
+    return this.sessions.get(sessionID)?.unread.has(msgid) ?? false
+  }
+
   /** Mark a stored message as unread again. */
   markUnread(sessionID: string, msgid: string): void {
     const s = this.sessions.get(sessionID)

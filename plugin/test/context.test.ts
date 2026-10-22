@@ -11,7 +11,7 @@ function input(over: Partial<ContextInput> = {}): ContextInput {
     budget: { used: 2, limit: 10, resetsInMs: 60_000 },
     linkState: "up",
     failMode: "ask",
-    hopBlocked: 0,
+    held: [],
     joinContext: null,
     ...over,
   }
@@ -61,9 +61,20 @@ describe("buildContext", () => {
     expect(buildContext(input())).not.toContain("used up")
   })
 
-  test("hop blocked note", () => {
-    expect(buildContext(input({ hopBlocked: 2 }))).toContain("2 agent message(s) held back by the hop limit.")
-    expect(buildContext(input())).not.toContain("hop limit")
+  test("held messages are named with sender, place, msgid and reason", () => {
+    const held = Array.from({ length: 7 }, (_, i) => ({
+      sender: `a${i}`,
+      target: i === 0 ? "#dev" : "DM",
+      msgid: `m${i}`,
+      reason: "hop limit" as const,
+    }))
+    const text = buildContext(input({ held }))
+    expect(text).toContain(
+      "Not pushed to you (read with irc_read): a0 in #dev (msgid m0; hop limit), a1 in DM (msgid m1; hop limit)",
+    )
+    expect(text).toContain("a4 in DM (msgid m4; hop limit), +2 more.")
+    expect(text).not.toContain("a5")
+    expect(buildContext(input())).not.toContain("Not pushed")
   })
 
   test("offline with fail mode open", () => {

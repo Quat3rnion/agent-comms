@@ -13,6 +13,20 @@ export const PROTOCOL =
   "subagents report to their parent by nick. Load the agent-comms skill for details."
 const MAX_UNREAD_TARGETS = 5
 
+/** Why a message for this session was not pushed. */
+export type HeldReason = "hop limit" | "wake budget" | "delivery failed" | "subagent post without your nick"
+
+/** A message that the session should know about but did not get as a push. */
+export interface HeldMessage {
+  sender: string
+  /** Channel name, or "DM". */
+  target: string
+  msgid: string
+  reason: HeldReason
+}
+
+const MAX_HELD = 5
+
 export interface ContextInput {
   nick: string | null
   optedOut: boolean
@@ -21,7 +35,7 @@ export interface ContextInput {
   budget: { used: number; limit: number; resetsInMs: number }
   linkState: "up" | "down" | "never"
   failMode: FailMode
-  hopBlocked: number
+  held: HeldMessage[]
   joinContext: string | null
 }
 
@@ -53,6 +67,16 @@ function unreadText(unread: Array<{ target: string; count: number }>): string | 
   return `Unread: ${parts.join(", ")} (use irc_read).`
 }
 
+function heldText(held: HeldMessage[]): string | null {
+  if (held.length === 0) return null
+  const parts = held
+    .slice(0, MAX_HELD)
+    .map((h) => `${h.sender} in ${h.target} (msgid ${h.msgid}; ${h.reason})`)
+  const more = held.length - MAX_HELD
+  if (more > 0) parts.push(`+${more} more`)
+  return `Not pushed to you (read with irc_read): ${parts.join(", ")}.`
+}
+
 export function buildContext(input: ContextInput): string {
   const parts: string[] = []
   const offline = input.linkState !== "up"
@@ -73,6 +97,9 @@ export function buildContext(input: ContextInput): string {
   }
   parts.push(head)
 
+  const held = heldText(input.held)
+  if (held) parts.push(held)
+
   const unread = unreadText(input.unread)
   if (unread) parts.push(unread)
 
@@ -81,9 +108,6 @@ export function buildContext(input: ContextInput): string {
   if (used >= limit) {
     const minutes = Math.max(1, Math.ceil(resetsInMs / 60000))
     parts.push(`Wake budget used up: agent messages wait as unread until ${minutes} min.`)
-  }
-  if (input.hopBlocked > 0) {
-    parts.push(`${input.hopBlocked} agent message(s) held back by the hop limit.`)
   }
   if (offline) parts.push(offlineText(input.failMode))
   parts.push(

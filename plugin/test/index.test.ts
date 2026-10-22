@@ -782,6 +782,64 @@ describe("context hook", () => {
     expect(part.text).toContain("Unread: #lobby 1")
   })
 
+  test("names a directed message that was held back until it is read", async () => {
+    const { rt, link, h } = await bootWithSession({ options: { wakeBudget: 0 } })
+    link.deliver("ses_a", priv({ hop: 5, msgid: "held1", senderNick: "fix-auth|task1", rel: "descendant" }))
+    link.deliver("ses_a", priv({ msgid: "held2" }))
+    link.deliver("ses_a", priv({ target: "#lobby", text: "chatter", msgid: "chat1" }))
+    await rt.settle()
+    expect(h.prompts).toHaveLength(0)
+
+    const ev = { sessionID: "ses_a", system: [] as unknown[] }
+    await h.hooks.context[0]?.(ev)
+    const text = (ev.system[0] as { text: string }).text
+    expect(text).toContain("fix-auth|task1 in DM (msgid held1; hop limit)")
+    expect(text).toContain("bob in DM (msgid held2; wake budget)")
+    expect(text).not.toContain("chat1")
+
+    rt.inbox.read("ses_a")
+    const after = { sessionID: "ses_a", system: [] as unknown[] }
+    await h.hooks.context[0]?.(after)
+    expect((after.system[0] as { text: string }).text).not.toContain("held1")
+  })
+
+  test("names a subagent post in a channel that does not name the parent", async () => {
+    const { rt, link, h } = await bootWithSession()
+    link.deliver("ses_a", priv({ target: "#agent-comms", text: "done: tests pass", msgid: "rep1", rel: "descendant", senderNick: "fix-auth|task1" }))
+    link.deliver("ses_a", priv({ target: "#agent-comms", text: "peer chatter", msgid: "peer1" }))
+    await rt.settle()
+    expect(h.prompts).toHaveLength(0)
+    const ev = { sessionID: "ses_a", system: [] as unknown[] }
+    await h.hooks.context[0]?.(ev)
+    const text = (ev.system[0] as { text: string }).text
+    expect(text).toContain("fix-auth|task1 in #agent-comms (msgid rep1; subagent post without your nick)")
+    expect(text).not.toContain("peer1")
+  })
+
+  test("a mention of the untruncated title slug is directed", async () => {
+    const { rt, link, h } = await boot({ options: { nickSlugLength: 8 }, sessions: { ses_a: info("ses_a") } })
+    await h.events.push(created("ses_a", { title: "Fix authentication" }))
+    await rt.settle()
+    expect(rt.registry.get("ses_a")?.nick).toBe("fix-auth")
+    link.deliver("ses_a", priv({ target: "#lobby", text: "fix-authentication: done" }))
+    link.deliver("ses_a", priv({ target: "#lobby", text: "fix-authorization: not you" }))
+    await rt.settle()
+    expect(h.prompts).toHaveLength(1)
+    expect(String(h.prompts[0]?.["text"])).toContain("fix-authentication: done")
+  })
+
+  test("names a message whose push failed", async () => {
+    const { rt, link, h } = await bootWithSession()
+    h.ctx.session.prompt = async () => {
+      throw new Error("All fibers interrupted without error")
+    }
+    link.deliver("ses_a", priv({ msgid: "fail1" }))
+    await rt.settle()
+    const ev = { sessionID: "ses_a", system: [] as unknown[] }
+    await h.hooks.context[0]?.(ev)
+    expect((ev.system[0] as { text: string }).text).toContain("bob in DM (msgid fail1; delivery failed)")
+  })
+
   test("a model call marks an idle session busy (missed execution events)", async () => {
     const { rt, link, h } = await bootWithSession()
     await rt.settle()

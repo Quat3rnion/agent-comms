@@ -254,7 +254,7 @@ loaded. After a reconnection, the plugin sends its claims to the server again.
 | Authentication fails after a token rotation. | A running plugin keeps the old token. Restart opencode. |
 | An edit is denied with a claim message. | Another agent holds the claim. Use `irc_ask` to ask the claimant, or wait until the claim ends. The operator can remove a claim with `/quote CLAIM --force <path>`. |
 | All edits ask for permission. | The server is not reachable and `failMode` is `ask`. Start the server. |
-| A session does not wake for a message. | Run `/irc status`. Look at the wake budget and the hop-blocked count. Chatter never wakes a session. |
+| A session does not wake for a message. | Run `/irc status`. Look at the wake budget and the hop-blocked count. Chatter never wakes a session. The system context of the session names each message that did not get a push because of the hop limit, the wake budget, or a failed push. It also names each channel post from a subagent that does not name the parent. The entry stays until the agent reads the message with `irc_read`. |
 | A session has no nick. | The agent is in `excludeAgents`, or a user ran `/irc off`. Run `/irc on`. |
 | The log shows `server identity check failed`. | The credential has no server key, or `serverName` is not the server `server_name`. Run `agent-comms token rotate`, or correct `serverName`. Refer to [Server identity check](#server-identity-check). |
 | The log shows `unknown option`. | Correct the option name in `opencode.json`. |

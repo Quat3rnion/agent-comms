@@ -22,6 +22,7 @@ import {
 } from "./claims.ts"
 import type { EditDecision } from "./claims.ts"
 import { buildContext } from "./context.ts"
+import type { HeldMessage, HeldReason } from "./context.ts"
 import {
   HopTracker,
   MultilineAssembler,
@@ -266,6 +267,8 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
   const family = new FamilyIndex()
   const budgets = new Map<string, WakeBudget>()
   const hopBlocked = new Map<string, number>()
+  /** Messages that did not get a push but that the session should see named in its context. */
+  const held = new Map<string, Map<string, HeldMessage>>()
   let assembler = new MultilineAssembler()
 
   const introducedOnLink = new Set<string>()
@@ -442,6 +445,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     family.delete(sessionID)
     budgets.delete(sessionID)
     hopBlocked.delete(sessionID)
+    held.delete(sessionID)
     hop.endTurn(sessionID)
     inbox.clear(sessionID)
     introducedOnLink.delete(sessionID)
@@ -675,6 +679,38 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     }
   }
 
+  /**
+   * Nick and aliases that count as a mention. A top-level nick is the title slug cut to
+   * nickSlugLength; agents often write the uncut slug, so it counts too.
+   */
+  function meOf(rec: SessionRecord): { nick: string; aliases: string[] } {
+    const aliases = registry.aliases(rec.sessionID)
+    if (!rec.provisional && liveParent(rec) === undefined && rec.title.trim() !== "") {
+      const full = slugify(rec.title, 64)
+      if (full !== rec.nick && full.startsWith(rec.nick)) aliases.push(full)
+    }
+    return { nick: rec.nick, aliases }
+  }
+
+  function hold(sessionID: string, m: InboundMessage, reason: HeldReason): void {
+    if (m.msgid === "") return
+    let s = held.get(sessionID)
+    if (!s) {
+      s = new Map()
+      held.set(sessionID, s)
+    }
+    s.set(m.msgid, { sender: m.senderNick, target: m.isChannel ? m.target : "DM", msgid: m.msgid, reason })
+  }
+
+  /** Held messages that are still unread. Drops the ones that were read. */
+  function heldFor(sessionID: string): HeldMessage[] {
+    const s = held.get(sessionID)
+    if (!s) return []
+    for (const id of [...s.keys()]) if (!inbox.isUnread(sessionID, id)) s.delete(id)
+    if (s.size === 0) held.delete(sessionID)
+    return [...s.values()]
+  }
+
   async function onInbound(sessionID: string, m: InboundMessage): Promise<void> {
     const rec = registry.get(sessionID)
     if (!rec) return
@@ -682,7 +718,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     if (m.msgid !== "") {
       if (inbox.get(sessionID, m.msgid) !== undefined || inflight.has(m.msgid)) return
     }
-    const me = { nick: rec.nick, aliases: registry.aliases(sessionID) }
+    const me = meOf(rec)
     const directedness = classify(m, me)
     // "buffered": an ask window holds the message. Store it as read; the window either
     // uses it or hands it back through redeliver.
@@ -715,7 +751,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
 
   /** Decide how to deliver an inbound message, then push it or keep it unread. */
   async function dispatch(sessionID: string, rec: SessionRecord, m: InboundMessage): Promise<void> {
-    const me = { nick: rec.nick, aliases: registry.aliases(sessionID) }
+    const me = meOf(rec)
     const directedness = classify(m, me)
     const now = clock()
     const budget = budgetFor(sessionID)
@@ -733,6 +769,11 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     if (decision.kind === "unread") {
       if (decision.reason === "hop-limit") hopBlocked.set(sessionID, (hopBlocked.get(sessionID) ?? 0) + 1)
       store(sessionID, m, true)
+      if (decision.reason === "hop-limit") hold(sessionID, m, "hop limit")
+      else if (decision.reason === "budget") hold(sessionID, m, "wake budget")
+      else if (decision.reason === "chatter" && m.isChannel && m.rel === "descendant") {
+        hold(sessionID, m, "subagent post without your nick")
+      }
       return
     }
 
@@ -744,6 +785,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
         hop.steerTurn(sessionID, m.hop, fromOperator)
         const ok = await inject(sessionID, text, "steer")
         store(sessionID, m, !ok)
+        if (!ok) hold(sessionID, m, "delivery failed")
         return
       }
       if (decision.countsAgainstBudget) budget.consume(now)
@@ -757,6 +799,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
         queueState(sessionID)
       }
       store(sessionID, m, !ok)
+      if (!ok) hold(sessionID, m, "delivery failed")
     } finally {
       if (m.msgid !== "") inflight.delete(m.msgid)
     }
@@ -987,7 +1030,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
       budget: budgetFor(rec.sessionID).snapshot(clock()),
       linkState: linkStateText(),
       failMode: options.failMode,
-      hopBlocked: hopBlocked.get(rec.sessionID) ?? 0,
+      held: heldFor(rec.sessionID),
       joinContext: inbox.takeJoinContext(rec.sessionID),
     })
   }
