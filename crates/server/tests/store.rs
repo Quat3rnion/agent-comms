@@ -561,3 +561,15 @@ fn time_helpers() {
     let now = now_ms();
     assert_eq!(parse_time(&format_time_ms(now)), Some(now));
 }
+
+/// A container with a read-only root file system has no temp directory.
+/// SQLite then fails each insert that needs a temp file ("disk I/O error"),
+/// and messages are lost. The store must keep temp files in memory.
+#[test]
+fn temp_files_stay_in_memory() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(&dir.path().join("a.db")).unwrap();
+    assert_eq!(store.temp_store().unwrap(), 2);
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.temp_store().unwrap(), 2);
+}

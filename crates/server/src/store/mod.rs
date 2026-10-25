@@ -183,6 +183,11 @@ impl Store {
 
     fn init(mut conn: Connection) -> Result<Store, StoreError> {
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // Keep temporary files (the savepoint journal of each message insert,
+        // sorts) in memory. A container with a read-only root file system has
+        // no writable temp directory: there SQLite fails with "disk I/O error"
+        // and the message is not stored.
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.busy_timeout(Duration::from_secs(5))?;
         schema::migrate(&mut conn)?;
         // AUTOINCREMENT never reuses a `seq`: start after the highest one.
@@ -197,6 +202,12 @@ impl Store {
             next_seq: Mutex::new(last_seq + 1),
             last_insert: Mutex::new(None),
         })
+    }
+
+    /// `PRAGMA temp_store` of the connection (2 = memory).
+    pub fn temp_store(&self) -> StoreResult<i64> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row("PRAGMA temp_store", [], |r| r.get(0))?)
     }
 
     /// The schema version of the open database (`PRAGMA user_version`).

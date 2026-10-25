@@ -9,6 +9,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Server: keep SQLite temporary files in memory. In a container with a
+  read-only root file system, most message inserts failed with "disk I/O
+  error", so history, replay, and unread state lost those messages.
 - Plugin: a session that moves to another directory no longer loses DMs. The
   old location sends the new link verb `DETACH`, so the server stops sending
   deliveries to a link that does not serve the session. A delivery for an
