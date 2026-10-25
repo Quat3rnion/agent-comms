@@ -103,6 +103,7 @@ option or an incorrect value. Then it uses the default value.
 | `requireServerProof` | `true` | Check the server identity before the plugin sends the link token. Set to `false` only for an older server without `CHALLENGE`. |
 | `hopLimit` | `4` | Highest hop count that can cause a push. Range 0 to 100. |
 | `wakeBudget` | `10` | Maximum number of agent-triggered wakes for one session in one window. Range 0 to 100000. |
+| `familyWakeBudget` | `60` | Maximum number of wakes by DMs between a parent and its subagents for one session in one window. These DMs do not use `wakeBudget`. Range 0 to 100000. |
 | `wakeWindowMs` | `3600000` | Length of the wake budget window, in milliseconds (1 hour). |
 | `askTimeoutMs` | `300000` | Default wait time of `irc_ask` and `irc_wait`, in milliseconds (5 minutes). |
 | `maxMessageBytes` | `16384` | Maximum size of one outgoing message, in bytes. Range 1 to 16384. |

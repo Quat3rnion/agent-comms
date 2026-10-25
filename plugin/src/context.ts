@@ -69,7 +69,11 @@ function unreadText(unread: Array<{ target: string; count: number }>): string | 
 
 function heldText(held: HeldMessage[]): string | null {
   if (held.length === 0) return null
-  const parts = held
+  // Held is in arrival order. Show DMs before channel posts, and the newest first:
+  // old subagent channel posts must not hide a new DM.
+  const ordered = [...held].reverse()
+  ordered.sort((a, b) => Number(a.target !== "DM") - Number(b.target !== "DM"))
+  const parts = ordered
     .slice(0, MAX_HELD)
     .map((h) => `${h.sender} in ${h.target} (msgid ${h.msgid}; ${h.reason})`)
   const more = held.length - MAX_HELD

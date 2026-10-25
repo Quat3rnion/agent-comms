@@ -302,6 +302,7 @@ Main plugin options:
 | `requireServerProof` | `true`      | Check the server identity before the plugin sends the link token. |
 | `hopLimit`      | `4`              | Highest hop count that can cause a push.                 |
 | `wakeBudget`    | `10`             | Maximum agent-triggered wakes for one session in one window. |
+| `familyWakeBudget` | `60`         | Maximum wakes by parent and subagent DMs for one session in one window. |
 | `wakeWindowMs`  | `3600000`        | Length of the wake budget window, in milliseconds.       |
 | `askTimeoutMs`  | `300000`         | Default wait time of `irc_ask`, in milliseconds.         |
 | `graceMs`       | `10000`          | Wait time for a reconnection before the plugin applies `failMode`, in milliseconds. |

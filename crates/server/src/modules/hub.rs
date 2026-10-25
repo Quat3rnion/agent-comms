@@ -246,6 +246,23 @@ impl LinkHub {
         out
     }
 
+    /// Remove the attachment of `link_name` to `account`. Returns false when
+    /// the link was not attached.
+    pub fn detach(&self, account: &str, link_name: &str) -> bool {
+        let mut map = self.attached.lock();
+        let key = fold(account);
+        let Some(list) = map.get_mut(&key) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|a| a.link_name != link_name);
+        let removed = list.len() != before;
+        if list.is_empty() {
+            map.remove(&key);
+        }
+        removed
+    }
+
     /// Forget all attachments of `account`. Returns the removed link names.
     pub fn remove_account(&self, account: &str) -> Vec<String> {
         self.attached

@@ -452,7 +452,7 @@ fn dispatch(
             *burst_started = None;
             return Ok(Next::ServerBurst);
         }
-        "INTRODUCE" | "RENAME" | "RETIRE" | "STATE" => {
+        "INTRODUCE" | "RENAME" | "RETIRE" | "DETACH" | "STATE" => {
             super::accounts::handle(shared, state, ctx, msg);
         }
         "SEND" => super::send::handle(shared, state, ctx, msg),

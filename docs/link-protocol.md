@@ -372,7 +372,7 @@ Delivery cursor rules:
 
 - **Labels.** The link MAY put the tag `label=<l>` on any link-to-server line.
   The server MUST copy the label to each direct reply to that line. Direct
-  replies are `INTRODUCED`, `RENAMED`, `RETIRED`, `SENT`, `SENDFAIL`,
+  replies are `INTRODUCED`, `RENAMED`, `RETIRED`, `DETACHED`, `SENT`, `SENDFAIL`,
   `CLAIMSET`, `CLAIMFAIL`, `CLAIMDEL`, and `FAIL`. For `CLAIMSET` and
   `CLAIMDEL`, only the copy that goes to the requesting link has the label.
   A label value uses only `[A-Za-z0-9_-]` and is 1 to 64 characters long.
@@ -598,7 +598,8 @@ Attach:
 - For each attached link, the server keeps: the link name, the last `STATE`
   (`busy` or `idle`), the time of the last `STATE busy`, and the time of the
   attach.
-- A link detaches when it disconnects, or when the account retires.
+- A link detaches when it disconnects, when it sends `DETACH`, or when the
+  account retires.
 - The server stores only the name of the link that attached last. The server
   uses it only after a server restart, when the accounts are dormant.
 
@@ -612,6 +613,24 @@ Authority:
   UNKNOWN_ACCOUNT`.
 - `RETIRE` from one attached link retires the account for all links. The
   server sends `RETIRED <account>` to each attached link.
+
+Detach:
+
+```
+DETACH <account>
+```
+
+- A link sends `DETACH` when the session of the account is no longer at the
+  location of the link (for example, the session moved to a different
+  directory). The link MUST NOT keep an attachment for an account that it does
+  not serve. Else the server can send deliveries to a link that drops them.
+- The server removes the attachment of this link only. The account does not
+  retire. The primary link changes. Without other attached links, the account
+  is dormant (section 6.8), and its messages wait for the replay of the next
+  link that introduces it.
+- The server replies `DETACHED <account>`. When the link is not attached, the
+  server replies `FAIL DETACH UNKNOWN_ACCOUNT`.
+- A link SHOULD ignore `FAIL DETACH UNKNOWN_COMMAND` from an older server.
 
 Presence: see section 6.7.
 
@@ -1126,6 +1145,8 @@ both directions. All lines can carry a `label` tag (section 5).
 | `RENAMED`     | S>L   | `RENAMED <account> <assigned-nick>`                                                     | none                                                 |
 | `RETIRE`      | L>S   | `RETIRE <account> [:reason]`                                                            | `RETIRED`, or `FAIL RETIRE`                          |
 | `RETIRED`     | S>L   | `RETIRED <account> [:reason]`                                                           | none                                                 |
+| `DETACH`      | L>S   | `DETACH <account>`                                                                      | `DETACHED`, or `FAIL DETACH`                         |
+| `DETACHED`    | S>L   | `DETACHED <account>`                                                                    | none                                                 |
 | `STATE`       | L>S   | `STATE <account> busy\|idle`                                                            | none, or `FAIL STATE`; `busy` can cause `CLAIMSET`   |
 | `SEND`        | L>S   | `SEND <account> :<inner client line>`                                                   | `SENT`, `SENDFAIL`, `DELIVER`, or `FAIL SEND`        |
 | `SENT`        | S>L   | `SENT <account> <msgid>`                                                                | none                                                 |

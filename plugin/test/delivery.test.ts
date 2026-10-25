@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  budgetKind,
   HopTracker,
   MultilineAssembler,
   WakeBudget,
@@ -360,6 +361,32 @@ describe("decide", () => {
       const budget = new WakeBudget(0, 1000)
       expect(decide({ ...base(), budget, m: inbound({ hop: 50, rel }) })).toEqual({ kind: "unread", reason: "budget" })
     }
+  })
+
+  test("e3: family DMs use the family budget, not the wake budget", () => {
+    const dm = (rel: "ancestor" | "descendant" | "peer") => inbound({ rel, isChannel: false, target: "me-nick" })
+    const budget = new WakeBudget(0, 1000)
+    const familyBudget = new WakeBudget(1, 1000)
+    for (const rel of ["ancestor", "descendant"] as const) {
+      expect(decide({ ...base(), budget, familyBudget, m: dm(rel) })).toEqual({
+        kind: "push",
+        mode: "wake",
+        countsAgainstBudget: true,
+      })
+      // A family post in a channel still uses the wake budget.
+      const post = inbound({ rel, isChannel: true, target: "#p" })
+      expect(decide({ ...base(), budget, familyBudget, m: post, addressed: true })).toEqual({
+        kind: "unread",
+        reason: "budget",
+      })
+    }
+    familyBudget.consume(0)
+    expect(decide({ ...base(), budget, familyBudget, m: dm("descendant") })).toEqual({
+      kind: "unread",
+      reason: "budget",
+    })
+    expect(budgetKind(dm("descendant"))).toBe("family")
+    expect(budgetKind(dm("peer"))).toBe("wake")
   })
   test("f: busy steers without budget", () => {
     const budget = new WakeBudget(1, 1000)

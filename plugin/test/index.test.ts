@@ -67,6 +67,8 @@ class FakeLink {
         return msg("RENAMED", [account, m.params[1] ?? ""])
       case "RETIRE":
         return msg("RETIRED", [account])
+      case "DETACH":
+        return msg("DETACHED", [account])
       case "CLAIM": {
         const path = m.params[1] ?? ""
         return this.claimFail
@@ -509,6 +511,17 @@ describe("session lifecycle", () => {
     await rt.settle()
     expect(rt.registry.get("ses_a")).toBeUndefined()
     expect(byCommand(link.requests, "RETIRE")).toHaveLength(0)
+    // The server must stop sending deliveries for ses_a to this link.
+    expect(byCommand(link.requests, "DETACH")).toEqual([["ses_a"]])
+  })
+
+  test("a delivery for an unknown account is logged and detached once", async () => {
+    const { rt, link, logs } = await bootWithSession()
+    link.deliver("ses_gone", priv({ msgid: "lost1" }))
+    link.deliver("ses_gone", priv({ msgid: "lost2" }))
+    await rt.settle()
+    expect(logs.some((l) => l.includes("dropped delivery for unknown account ses_gone msgid=lost1"))).toBe(true)
+    expect(byCommand(link.requests, "DETACH")).toEqual([["ses_gone"]])
   })
 
   test("DISOWN removes the record", async () => {
@@ -669,6 +682,17 @@ describe("inbound delivery", () => {
     expect(lines[0]).toContain("info deliver session=ses_a msgid=lg1 from=bob rel=peer in=DM hop=5 busy=false -> unread hop-limit")
     expect(lines[1]).toContain("msgid=lg2")
     expect(lines[1]).toContain("-> push wake")
+  })
+
+  test("a subagent DM wakes the parent from the family budget when the wake budget is used up", async () => {
+    const { rt, link, h } = await bootWithSession({ options: { wakeBudget: 0, familyWakeBudget: 1 } })
+    link.deliver("ses_a", priv({ text: "peer ping", msgid: "f0" }))
+    await rt.settle()
+    expect(h.prompts).toHaveLength(0)
+    link.deliver("ses_a", priv({ text: "report", msgid: "f1", rel: "descendant", senderNick: "me|task1" }))
+    await rt.settle()
+    expect(h.prompts).toHaveLength(1)
+    expect(String(h.prompts[0]?.["text"])).toContain("[IRC report] me|task1")
   })
 
   test("the operator bypasses the wake budget", async () => {

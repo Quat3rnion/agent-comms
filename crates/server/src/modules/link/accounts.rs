@@ -18,12 +18,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const INACTIVITY_CHECK_EVERY: Duration = Duration::from_secs(3600);
 
-/// Link verbs of this file: INTRODUCE, RENAME, RETIRE, STATE.
+/// Link verbs of this file: INTRODUCE, RENAME, RETIRE, DETACH, STATE.
 pub fn handle(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, msg: &Message) {
     match msg.command_upper().as_str() {
         "INTRODUCE" => introduce(shared, state, ctx, msg),
         "RENAME" => rename(shared, state, ctx, msg),
         "RETIRE" => retire(shared, state, ctx, msg),
+        "DETACH" => detach(shared, state, ctx, msg),
         "STATE" => set_state(shared, state, ctx, msg),
         _ => ctx.fail(msg, "UNKNOWN_COMMAND", &[], "Unknown command"),
     }
@@ -644,6 +645,38 @@ pub fn retire_account(
         None => false,
     };
     in_world.is_some() || owned || stored
+}
+
+// ---------------------------------------------------------------------------
+// DETACH
+
+/// The session of the account left the location of this link (section 6.9).
+/// Detach this link only. The account stays: other attached links get its
+/// deliveries, or else it is dormant and its messages wait for a replay.
+fn detach(shared: &Arc<LinkShared>, state: &SharedState, ctx: &mut LinkCtx, msg: &Message) {
+    let Some(account) = msg.param(0) else {
+        ctx.fail(msg, "INVALID_PARAMS", &[], "Not enough parameters");
+        return;
+    };
+    let hub = shared.hub.clone();
+    let link_name = ctx.entry.name.clone();
+    if !hub.detach(account, &link_name) {
+        ctx.fail(
+            msg,
+            "UNKNOWN_ACCOUNT",
+            &[account],
+            "No such account on this link",
+        );
+        return;
+    }
+    let key = fold(account);
+    ctx.accounts.retain(|a| fold(a) != key);
+    state.with_world(|cx| {
+        if let Some(uid) = cx.world.find_account(account) {
+            sync_account(cx, &hub, uid, account);
+        }
+    });
+    ctx.reply(msg, Message::new("DETACHED", vec![account.to_string()]));
 }
 
 // ---------------------------------------------------------------------------

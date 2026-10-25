@@ -21,6 +21,7 @@ export const DEFAULT_OPTIONS: Options = {
   requireServerProof: true,
   hopLimit: 4,
   wakeBudget: 10,
+  familyWakeBudget: 60,
   wakeWindowMs: 3_600_000,
   askTimeoutMs: 300_000,
   maxMessageBytes: 16384,
@@ -39,6 +40,7 @@ type IntKey =
   | "port"
   | "hopLimit"
   | "wakeBudget"
+  | "familyWakeBudget"
   | "wakeWindowMs"
   | "askTimeoutMs"
   | "maxMessageBytes"
@@ -52,6 +54,7 @@ const INT_RANGES: Record<IntKey, [number, number]> = {
   port: [1, 65535],
   hopLimit: [0, 100],
   wakeBudget: [0, 100_000],
+  familyWakeBudget: [0, 100_000],
   wakeWindowMs: [1, 86_400_000],
   askTimeoutMs: [1, 86_400_000],
   maxMessageBytes: [1, 16384],

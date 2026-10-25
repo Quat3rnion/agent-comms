@@ -7,6 +7,22 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Plugin: a session that moves to another directory no longer loses DMs. The
+  old location sends the new link verb `DETACH`, so the server stops sending
+  deliveries to a link that does not serve the session. A delivery for an
+  unknown account is logged and causes a `DETACH`.
+- Plugin: DMs between a parent and its subagents use a separate wake budget
+  (`familyWakeBudget`, default 60 for each window). Subagent reports no longer
+  stay unread when the normal wake budget is used up.
+- Plugin: "Not pushed to you" in the session context shows held DMs first, and
+  the newest first.
+
+### Added
+
+- Server: link verb `DETACH <account>` (link protocol section 6.9).
+
 ### Added
 
 - Hermes plugin in `hermes/`: gateway platform, IRC tools, and file claims.

@@ -32,6 +32,7 @@ import {
   classify,
   decide,
   decodeInbound,
+  budgetKind,
   isFamily,
   wrap,
 } from "./delivery.ts"
@@ -284,6 +285,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
   const claims = new ClaimTracker()
   const family = new FamilyIndex()
   const budgets = new Map<string, WakeBudget>()
+  const familyBudgets = new Map<string, WakeBudget>()
   const hopBlocked = new Map<string, number>()
   /** Messages that did not get a push but that the session should see named in its context. */
   const held = new Map<string, Map<string, HeldMessage>>()
@@ -291,6 +293,8 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
 
   const introducedOnLink = new Set<string>()
   const pendingRetires = new Map<string, string>()
+  /** Accounts that got a DETACH after a delivery for an unknown account. */
+  const staleDetached = new Set<string>()
   const injected = new Set<string>()
   const inflight = new Set<string>()
   const rejected = new Set<string>()
@@ -302,6 +306,15 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
   const abort = new AbortController()
   let everEstablished = false
   let disposed = false
+
+  function familyBudgetFor(sessionID: string): WakeBudget {
+    let b = familyBudgets.get(sessionID)
+    if (!b) {
+      b = new WakeBudget(options.familyWakeBudget, options.wakeWindowMs)
+      familyBudgets.set(sessionID, b)
+    }
+    return b
+  }
 
   function budgetFor(sessionID: string): WakeBudget {
     let b = budgets.get(sessionID)
@@ -424,7 +437,10 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
         const nick = reply.params[1]
         if (account === undefined || nick === undefined) return
         applyAssigned(account, nick)
-        if (reply.command === "INTRODUCED") introducedOnLink.add(account)
+        if (reply.command === "INTRODUCED") {
+          introducedOnLink.add(account)
+          staleDetached.delete(account)
+        }
         return
       }
       case "FAIL":
@@ -462,6 +478,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     claims.releaseAll(sessionID)
     family.delete(sessionID)
     budgets.delete(sessionID)
+    familyBudgets.delete(sessionID)
     hopBlocked.delete(sessionID)
     held.delete(sessionID)
     hop.endTurn(sessionID)
@@ -641,9 +658,30 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
   function forget(sessionID: string): void {
     const rec = registry.get(sessionID)
     if (!rec) return
+    const attached = introducedOnLink.has(sessionID)
     cleanupLocal(sessionID)
     pendingRetires.delete(sessionID)
     registry.remove(sessionID)
+    // Without DETACH the server keeps this link attached, can pick it as the
+    // primary link, and sends deliveries here that nobody reads.
+    if (attached) detach(sessionID, "session left this location")
+  }
+
+  /** Remove the attachment of this link to `account` on the server. */
+  function detach(account: string, why: string): void {
+    if (!link.connected) return // a closed link has no attachments
+    log("info", `detach ${account}: ${why}`)
+    void link.request(msg("DETACH", [account])).then(
+      (reply) => {
+        const code = reply.command === "FAIL" ? reply.params[1] : undefined
+        if (code !== undefined && code !== "UNKNOWN_ACCOUNT") {
+          log("warn", `detach ${account} refused: ${reply.params.join(" ")}`)
+        }
+      },
+      (e: unknown) => {
+        if (!(e instanceof LinkDownError)) log("warn", `detach ${account} failed: ${String(e)}`)
+      },
+    )
   }
 
   async function handleEvent(ev: unknown): Promise<void> {
@@ -772,7 +810,7 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
     const me = meOf(rec)
     const directedness = classify(m, me)
     const now = clock()
-    const budget = budgetFor(sessionID)
+    const budget = budgetKind(m) === "family" ? familyBudgetFor(sessionID) : budgetFor(sessionID)
     const decision = decide({
       m,
       directedness,
@@ -833,7 +871,21 @@ export async function createRuntime(ctx: Ctx, deps: RuntimeDeps = {}): Promise<R
 
   function onDeliver(account: string, inner: IrcMessage, outer: IrcMessage): void {
     const rec = registry.get(account)
-    if (!rec) return
+    if (!rec) {
+      // A stale attachment: the session is not (or no longer) at this location.
+      // Report the drop and detach, so that the next delivery goes elsewhere.
+      if (inner.command === "PRIVMSG" || inner.command === "NOTICE") {
+        log(
+          "warn",
+          `dropped delivery for unknown account ${account} msgid=${getTag(inner, "msgid") ?? getTag(outer, "msgid") ?? "-"}`,
+        )
+      }
+      if (!staleDetached.has(account)) {
+        staleDetached.add(account)
+        detach(account, "delivery for an account that this location does not serve")
+      }
+      return
+    }
 
     if (inner.command === "JOIN" || inner.command === "PART") {
       const who = sourceNick(inner)

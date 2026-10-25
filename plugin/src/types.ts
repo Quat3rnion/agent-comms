@@ -31,6 +31,8 @@ export interface Options {
   requireServerProof: boolean
   hopLimit: number
   wakeBudget: number
+  /** Wakes by parent/subagent DMs for one session in one window. Separate from wakeBudget. */
+  familyWakeBudget: number
   wakeWindowMs: number
   askTimeoutMs: number
   maxMessageBytes: number

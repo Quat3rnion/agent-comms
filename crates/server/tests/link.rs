@@ -932,6 +932,54 @@ async fn shared_both_down_replay_once() {
         .is_none());
 }
 
+/// A session moved away from the location of a busy link: after DETACH the
+/// deliveries go to the other link, and a sole link leaves the account
+/// dormant, so its messages wait for a replay instead of a stale link.
+#[tokio::test]
+async fn shared_detach_moves_deliveries() {
+    let dir = tmp();
+    let srv = start(dir.path()).await;
+    let (mut x, mut y, mut op) = shared_pair(srv.local_addr).await;
+
+    x.send("STATE ses_M busy").await;
+    x.sync().await;
+    x.send("@label=d DETACH ses_M").await;
+    let m = x.expect_cmd("DETACHED").await;
+    assert_eq!(m.param(0), Some("ses_M"));
+    assert_eq!(m.tag("label"), Some("d"));
+
+    dm_to_mover(&mut op, "after detach").await;
+    y.expect(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "after detach"))
+        .await;
+    let stray = x
+        .try_expect(SHORT, |m| {
+            is_deliver_msg(m, "ses_M", "PRIVMSG", "after detach")
+        })
+        .await;
+    assert!(stray.is_none(), "{stray:?}");
+    x.send("SEND ses_M :PRIVMSG #webapp :not mine").await;
+    let m = x.expect_cmd("FAIL").await;
+    assert_eq!(m.param(1), Some("UNKNOWN_ACCOUNT"));
+    x.send("DETACH ses_M").await;
+    let m = x.expect_cmd("FAIL").await;
+    assert_eq!(m.param(0), Some("DETACH"));
+
+    y.send("DETACH ses_M").await;
+    y.expect_cmd("DETACHED").await;
+    op.expect(|m| is_away_of(m, "mover") && m.param(0) == Some("dormant"))
+        .await;
+    dm_to_mover(&mut op, "while moving").await;
+    drop(x);
+    drop(y);
+    let (_z, bz) = linked(srv.local_addr, "link-z", &[INTRO_M]).await;
+    assert!(
+        bz.iter()
+            .any(|m| is_deliver_msg(m, "ses_M", "PRIVMSG", "while moving")),
+        "no replay after DETACH:\n{}",
+        dump(&bz)
+    );
+}
+
 #[tokio::test]
 async fn shared_authority_and_retire() {
     let dir = tmp();

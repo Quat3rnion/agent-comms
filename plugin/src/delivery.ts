@@ -311,11 +311,23 @@ export interface DecideInput {
    * Default: true for a DM, false for a channel message.
    */
   addressed?: boolean
+  /** Budget for wakes by family DMs (budgetKind "family"). Default: `budget`. */
+  familyBudget?: WakeBudget
 }
 
 /** True for a message between an agent and one of its ancestors or descendants. */
 export function isFamily(m: InboundMessage): boolean {
   return m.rel === "ancestor" || m.rel === "descendant"
+}
+
+/**
+ * The budget that a wake by `m` uses. A DM between a parent and its subagent
+ * uses the family budget: subagents report to the parent by DM, and a parent
+ * with many subagents uses up the normal wake budget quickly. Channel posts
+ * and peer messages use the normal wake budget.
+ */
+export function budgetKind(m: InboundMessage): "wake" | "family" {
+  return isFamily(m) && !m.isChannel ? "family" : "wake"
 }
 
 export function decide(input: DecideInput): Decision {
@@ -334,7 +346,8 @@ export function decide(input: DecideInput): Decision {
   // freely in one turn; the wake budget still limits wakes between them.
   if (m.hop > hopLimit && !isFamily(m)) return { kind: "unread", reason: "hop-limit" }
   if (busy) return { kind: "push", mode: "steer", countsAgainstBudget: false }
-  if (budget.remaining(now) <= 0) return { kind: "unread", reason: "budget" }
+  const b = budgetKind(m) === "family" ? (input.familyBudget ?? budget) : budget
+  if (b.remaining(now) <= 0) return { kind: "unread", reason: "budget" }
   return { kind: "push", mode: "wake", countsAgainstBudget: true }
 }
 

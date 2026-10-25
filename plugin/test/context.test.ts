@@ -69,11 +69,13 @@ describe("buildContext", () => {
       reason: "hop limit" as const,
     }))
     const text = buildContext(input({ held }))
+    // DMs first, newest first; channel posts last.
     expect(text).toContain(
-      "Not pushed to you (read with irc_read): a0 in #dev (msgid m0; hop limit), a1 in DM (msgid m1; hop limit)",
+      "Not pushed to you (read with irc_read): a6 in DM (msgid m6; hop limit), a5 in DM (msgid m5; hop limit)",
     )
-    expect(text).toContain("a4 in DM (msgid m4; hop limit), +2 more.")
-    expect(text).not.toContain("a5")
+    expect(text).toContain("a2 in DM (msgid m2; hop limit), +2 more.")
+    expect(text).not.toContain("a1 in")
+    expect(text).not.toContain("#dev")
     expect(buildContext(input())).not.toContain("Not pushed")
   })
 
